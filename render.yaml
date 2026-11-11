@@ -1,0 +1,32 @@
+# Render Blueprint: staging environment (API + worker + Redis).
+# The database is Neon (PostGIS enabled), so DATABASE_URL is set in the dashboard, not here.
+# Fill every `sync: false` value in the Render dashboard; see docs/INTEGRATIONS.md.
+services:
+  - type: web
+    name: autoscope-api
+    runtime: docker
+    healthCheckPath: /health
+    envVars: &shared
+      - { key: ENV, value: staging }
+      - { key: DATABASE_URL, sync: false }            # Neon pooled connection string
+      - { key: MIGRATION_DATABASE_URL, sync: false }  # Neon DIRECT (non-pooled) string, used by Alembic
+      - { key: JWT_SECRET, generateValue: true }
+      - { key: CORS_ORIGINS, value: "https://autoscope-admin.netlify.app" }
+      - { key: REDIS_URL, fromService: { type: redis, name: autoscope-redis, property: connectionString } }
+      - { key: SMS_DRIVER, value: mock }
+      - { key: EMAIL_DRIVER, value: mock }
+      - { key: PUSH_DRIVER, value: mock }
+      - { key: PAYMENT_DRIVER, value: mock }
+      - { key: KYC_DRIVER, value: mock }
+      - { key: STORAGE_DRIVER, value: local }
+
+  - type: worker
+    name: autoscope-worker
+    runtime: docker
+    dockerCommand: celery -A app.worker.celery_app worker --beat --loglevel=info
+    envVars: *shared
+
+  - type: redis
+    name: autoscope-redis
+    ipAllowList: []   # internal only
+    plan: free
