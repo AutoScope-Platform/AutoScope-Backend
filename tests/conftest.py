@@ -36,9 +36,12 @@ from app.main import app  # noqa: E402
 def engine():
     engine = get_engine()
     with engine.begin() as conn:
+        # Start from an empty schema so a model change never trips over leftovers
+        # from an earlier run (the test database is disposable).
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
         for ext in ("postgis", "pg_trgm", "pgcrypto"):
             conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {ext}"))
-    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     yield engine
     engine.dispose()

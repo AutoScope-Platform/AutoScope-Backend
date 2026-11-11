@@ -47,8 +47,12 @@ class Application(UUIDPrimaryKey, Timestamps, Base):
     terms: Mapped[str | None] = mapped_column(Text)
     offer_valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     decline_reason: Mapped[str | None] = mapped_column(String(300))
+    # use_alter: applications and policies point at each other, so this constraint is
+    # added after both tables exist (otherwise table creation order has no valid answer).
     renewal_of_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("policies.id", ondelete="SET NULL")
+        ForeignKey(
+            "policies.id", ondelete="SET NULL", use_alter=True, name="fk_applications_renewal_of"
+        )
     )
 
 
