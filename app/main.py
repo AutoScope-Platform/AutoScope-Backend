@@ -24,6 +24,7 @@ from app.modules.haulage.router import router as haulage_router
 from app.modules.identity.router import router as identity_router
 from app.modules.insurance.router import router as insurance_router
 from app.modules.messaging.router import router as messaging_router
+from app.modules.notifications.router import router as notifications_router
 from app.modules.orders.router import router as orders_router
 from app.modules.payments.router import router as payments_router
 from app.modules.reviews.router import router as reviews_router
@@ -58,6 +59,7 @@ ROUTERS: list[APIRouter] = [
     haulage_router,
     insurance_router,
     messaging_router,
+    notifications_router,
     orders_router,
     payments_router,
     reviews_router,
