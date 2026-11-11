@@ -25,8 +25,8 @@ from app.core.db import utcnow
 from app.core.errors import Conflict, NotFound, UnprocessableEntity
 from app.core.events import Event, publish, subscribe
 from app.core.permissions import ADMIN_ROLES, Role
+from app.core.realtime import Hub
 from app.modules.catalog import service as catalog
-from app.modules.haulage import hub
 from app.modules.haulage.models import (
     HaulageJob,
     JobOffer,
@@ -36,6 +36,9 @@ from app.modules.haulage.models import (
 from app.modules.identity.models import KycStatus, User, UserRole
 from app.modules.payments import service as payments
 from app.modules.payments.models import FINAL_STATUSES, Transaction, TransactionKind, TxStatus
+
+# Live tracking connections, keyed by job id (see app/core/realtime.py).
+hub = Hub()
 
 # --- Pricing and dispatch settings (kobo / km / minutes). Change here to retune. -------------
 BASE_FARE_MINOR = 3_000_00  # N3,000 call-out

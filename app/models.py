@@ -10,6 +10,7 @@ from app.modules.catalog import models as catalog_models  # noqa: F401
 from app.modules.haulage import models as haulage_models  # noqa: F401
 from app.modules.identity import models as identity_models  # noqa: F401
 from app.modules.insurance import models as insurance_models  # noqa: F401
+from app.modules.messaging import models as messaging_models  # noqa: F401
 from app.modules.orders import models as orders_models  # noqa: F401
 from app.modules.payments import models as payments_models  # noqa: F401
 from app.modules.reviews import models as reviews_models  # noqa: F401

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import jwt
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, Query, WebSocket, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
@@ -14,8 +13,9 @@ from app.core import db as db_module
 from app.core.db import get_db
 from app.core.errors import error_responses
 from app.core.permissions import Capability
+from app.core.realtime import pump
 from app.core.security import decode_token
-from app.modules.haulage import hub, service
+from app.modules.haulage import service
 from app.modules.haulage.models import HaulageJob
 from app.modules.haulage.schemas import (
     CancelIn,
@@ -244,20 +244,4 @@ async def track(websocket: WebSocket, job_id: uuid.UUID, token: str = Query(""))
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     await websocket.accept()
-    queue = hub.subscribe(job_id)
-    try:
-        await websocket.send_json(snapshot)
-        receiver = asyncio.create_task(websocket.receive_text())  # notices the client leaving
-        while True:
-            getter = asyncio.create_task(queue.get())
-            done, _ = await asyncio.wait({getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
-            if receiver in done:
-                getter.cancel()
-                receiver.result()  # raises WebSocketDisconnect when the client closed
-                receiver = asyncio.create_task(websocket.receive_text())  # ignore chatter
-            if getter in done:
-                await websocket.send_json(getter.result())
-    except WebSocketDisconnect:
-        pass
-    finally:
-        hub.unsubscribe(job_id, queue)
+    await pump(websocket, service.hub, job_id, first=snapshot)
