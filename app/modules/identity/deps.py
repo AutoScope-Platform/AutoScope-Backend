@@ -67,6 +67,21 @@ def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def get_optional_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """For public pages that show a bit more to a signed-in caller (e.g. a seller's own
+    pending listing). No token means anonymous; a bad token is still an error."""
+    if credentials is None:
+        return None
+    return get_current_user(request, credentials, db)
+
+
+OptionalUser = Annotated[User | None, Depends(get_optional_user)]
+
+
 def require_capability(capability: Capability) -> Callable[..., User]:
     """Dependency factory: the caller must hold `capability` (see `core/permissions.py`)."""
 

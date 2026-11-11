@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core import files
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
+from app.modules.catalog.router import router as catalog_router
 from app.modules.identity.router import router as identity_router
 from app.modules.payments.router import router as payments_router
 
@@ -44,7 +45,7 @@ TAGS = [
 ]
 
 # Every module's router is registered here.
-ROUTERS: list[APIRouter] = [identity_router, payments_router]
+ROUTERS: list[APIRouter] = [identity_router, catalog_router, payments_router]
 
 
 def create_app() -> FastAPI:
