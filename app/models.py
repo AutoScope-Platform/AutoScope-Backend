@@ -5,6 +5,7 @@ module with models, add its import here.
 """
 
 from app.core import audit, idempotency  # noqa: F401
+from app.modules.booking import models as booking_models  # noqa: F401
 from app.modules.catalog import models as catalog_models  # noqa: F401
 from app.modules.identity import models as identity_models  # noqa: F401
 from app.modules.orders import models as orders_models  # noqa: F401

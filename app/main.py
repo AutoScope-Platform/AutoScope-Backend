@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core import files
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
+from app.modules.booking.router import router as booking_router
 from app.modules.catalog.router import router as catalog_router
 from app.modules.identity.router import router as identity_router
 from app.modules.orders.router import router as orders_router
@@ -50,6 +51,7 @@ TAGS = [
 ROUTERS: list[APIRouter] = [
     identity_router,
     catalog_router,
+    booking_router,
     orders_router,
     payments_router,
     reviews_router,
