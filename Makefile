@@ -28,13 +28,16 @@ migrate:  ## Apply database migrations
 seed:  ## Load demo data (matches the admin dashboard)
 	uv run python -m app.seed
 
+demo:  ## Run the scripted end-to-end demo against a running server (make run, then make demo)
+	uv run python -m scripts.demo
+
 worker:  ## Run background jobs (escrow release, payouts, reminders)
 	uv run celery -A app.worker.celery_app worker --beat --loglevel=info
 
 migration:  ## Create a migration after changing models: make migration m="add x"
 	uv run alembic revision --autogenerate -m "$(m)"
 
-.PHONY: help install up run test lint format migrate seed worker migration
+.PHONY: help install up run test lint format migrate seed demo worker migration
 
 # Start the local database if it is not running (used inside cloud sandboxes, where it stops when idle).
 .PHONY: db-start

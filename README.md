@@ -21,7 +21,8 @@ make test
 After `make seed`, sign in at `POST /api/v1/auth/login` with `adaora@autoscope.ng` /
 `AutoScope#2026`, then verify with code `123456` (`/auth/login/verify`). Use the returned
 token with the **Authorize** button in Swagger. Other demo accounts are listed in `app/seed.py`.
-`make worker` runs the background jobs.
+`make worker` runs the background jobs. `make demo` (with the server running and data seeded)
+plays the four main journeys end to end: parts order, mechanic booking, SOS towing and insurance.
 
 ## Docs
 - `docs/ARCHITECTURE.md`: how the code is organised and the rules it follows
