@@ -111,3 +111,20 @@ def test_provider_analytics(client, db):
     assert r.json()["period_days"] == 30
     customer = make_user(db, Role.VEHICLE_OWNER)
     assert client.get(f"{API}/me/analytics", headers=auth_headers(customer)).status_code == 403
+
+
+def test_overview_counts_paid_sales_by_category(client, db):
+    from app.modules.payments.models import PaymentMethod
+
+    buyer, mech, tx = _paid_sale(db, amount=20_000_00)
+    payments.request_payment(db, tx)
+    ref = payments.start_payment(db, buyer, tx.id, PaymentMethod.CARD)[0].reference
+    payments.confirm_payment(db, ref)
+    db.commit()
+    body = client.get(
+        f"{API}/admin/overview", headers=auth_headers(make_user(db, Role.ADMIN))
+    ).json()
+    assert body["gmv_minor"] >= 20_000_00
+    assert body["gmv_by_category"]["mechanic_services"] >= 20_000_00
+    assert body["escrow_held_minor"] >= 20_000_00
+    assert body["gmv_series"]

@@ -29,6 +29,7 @@ from app.modules.identity import service as identity
 from app.modules.identity.models import AccountStatus, User
 from app.modules.payments import service as payments
 from app.modules.payments.models import (
+    CATEGORY_OF,
     Category,
     EscrowStatus,
     Transaction,
@@ -66,7 +67,7 @@ def overview(db: Session, *, days: int) -> dict:
         .where(*_COUNTED, Transaction.paid_at >= since)
         .group_by(Transaction.kind)
     ):
-        by_category[payments.CATEGORY_OF[kind].value] += int(total)
+        by_category[CATEGORY_OF[kind].value] += int(total)
 
     series = [
         {"date": day.isoformat(), "gmv_minor": int(total)}
