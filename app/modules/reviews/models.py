@@ -90,3 +90,7 @@ class Report(UUIDPrimaryKey, Timestamps, Base):
     resolved_by_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+
+    @property
+    def ref(self) -> str:
+        return f"RPT-{self.ref_no}"

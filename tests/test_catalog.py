@@ -296,7 +296,9 @@ def test_enquiry_and_offer_flow(client, db, dealer, admin):
     buyer = make_user(db, Role.VEHICLE_OWNER)
     body = {"message": "Is it negotiable?", "offer_minor": 900_000_000}
     path = f"{API}/listings/{listing['id']}/inquiries"
-    assert client.post(path, json=body, headers=auth_headers(buyer)).status_code == 404  # hidden until live
+    assert (
+        client.post(path, json=body, headers=auth_headers(buyer)).status_code == 404
+    )  # hidden until live
     _approve(client, admin, listing["id"])
     assert client.post(path, json=body, headers=auth_headers(dealer)).status_code == 422  # own
     created = client.post(path, json=body, headers=auth_headers(buyer))

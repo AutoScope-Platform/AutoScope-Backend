@@ -29,3 +29,8 @@ seed:  ## Load demo data (matches the admin dashboard)
 	uv run python -m app.seed
 
 .PHONY: help install up run test lint format migrate seed
+
+# Start the local database if it is not running (used inside cloud sandboxes, where it stops when idle).
+.PHONY: db-start
+db-start:
+	@pg_ctlcluster 16 main start 2>/dev/null || true
