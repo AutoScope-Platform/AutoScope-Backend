@@ -1,0 +1,31 @@
+# Everyday commands. `make help` lists them.
+.DEFAULT_GOAL := help
+
+help:  ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
+
+install:  ## Install dependencies
+	uv sync
+
+up:  ## Start PostGIS + Redis in Docker (see docker-compose.yml)
+	docker compose up -d
+
+run:  ## Run the API with auto-reload on http://localhost:8000/docs
+	uv run uvicorn app.main:app --reload
+
+test:  ## Run the test suite
+	uv run pytest
+
+lint:  ## Check code style
+	uv run ruff check app tests && uv run ruff format --check app tests
+
+format:  ## Auto-format code
+	uv run ruff format app tests && uv run ruff check --fix app tests
+
+migrate:  ## Apply database migrations
+	uv run alembic upgrade head
+
+seed:  ## Load demo data (matches the admin dashboard)
+	uv run python -m app.seed
+
+.PHONY: help install up run test lint format migrate seed

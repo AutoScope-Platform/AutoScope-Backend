@@ -1,0 +1,44 @@
+[project]
+name = "autoscope-backend"
+version = "0.1.0"
+description = "AutoScope marketplace backend API (vehicles, parts, repairs, haulage, insurance)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "email-validator>=2.2",
+    "sqlalchemy>=2.0.35",
+    "psycopg[binary,pool]>=3.2",
+    "alembic>=1.13",
+    "geoalchemy2>=0.15",
+    "pyjwt>=2.9",
+    "argon2-cffi>=23.1",
+    "redis>=5.0",
+    "celery>=5.4",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+    "boto3>=1.35",
+    "google-auth>=2.34",
+    "requests>=2.32",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008", "E501"]  # B008: FastAPI Depends() in defaults is the framework idiom; E501: the formatter wraps lines
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "app"]
+python_files = ["test_*.py"]
+addopts = "-q"

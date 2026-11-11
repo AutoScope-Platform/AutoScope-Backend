@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Local configuration and secrets: never commit these
+.env
+.env.*
+!.env.example
+
+# Local file storage used by the development storage driver
+.storage/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
