@@ -19,6 +19,7 @@ from app.core import files
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
 from app.modules.identity.router import router as identity_router
+from app.modules.payments.router import router as payments_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -36,10 +37,14 @@ haulage and insurance.
 
 TAGS = [
     {"name": "Identity", "description": "Sign-up, sign-in, profile, roles and KYC upload."},
+    {
+        "name": "Payments",
+        "description": "Paying, escrow, wallet, payouts, disputes and finance settings.",
+    },
 ]
 
 # Every module's router is registered here.
-ROUTERS: list[APIRouter] = [identity_router]
+ROUTERS: list[APIRouter] = [identity_router, payments_router]
 
 
 def create_app() -> FastAPI:
