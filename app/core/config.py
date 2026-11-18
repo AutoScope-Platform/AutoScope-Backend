@@ -36,7 +36,12 @@ class Settings(BaseSettings):
     # Accepts a plain `postgresql://` URL (what Neon and Render hand out); it is
     # rewritten to the psycopg 3 driver in `database_url_sync` below.
     database_url: str = "postgresql://autoscope:autoscope@127.0.0.1:5432/autoscope_dev"
+    # Connections per process. Small Postgres tiers allow few connections in total (Azure
+    # Burstable B1ms: about 50), so keep (pool + overflow) x processes under that limit.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
     # Redis is optional in local/test (rate limits and chat fan-out fall back to memory).
+    # Azure Cache for Redis needs TLS: rediss://:<access key>@<name>.redis.cache.windows.net:6380/0
     redis_url: str | None = None
     # "celery": push/SMS/e-mail are sent by the background worker (needs REDIS_URL and a
     # running worker). "inline": sent during the request (local development and tests).
@@ -64,7 +69,7 @@ class Settings(BaseSettings):
     payment_driver: Literal["mock", "paystack"] = "mock"
     # Only "mock" exists until a KYC vendor is chosen (see docs/INTEGRATIONS.md).
     kyc_driver: Literal["mock"] = "mock"
-    storage_driver: Literal["local", "s3"] = "local"
+    storage_driver: Literal["local", "s3", "azure"] = "local"
     vin_driver: Literal["mock", "nhtsa"] = "mock"
     # Google/Apple sign-in (FR-1.2). "live" checks real ID tokens against the client ids below.
     social_driver: Literal["mock", "live"] = "mock"
@@ -93,6 +98,12 @@ class Settings(BaseSettings):
     s3_access_key_id: str | None = None
     s3_secret_access_key: str | None = None
     s3_region: str = "auto"
+    # Azure Blob Storage: the storage account's connection string (it must include the
+    # AccountKey, used to sign short-lived download links) and the container name.
+    azure_storage_connection_string: str | None = None
+    azure_storage_container: str | None = None
+    # Azure Monitor / Application Insights: requests, errors and logs (TSD monitoring).
+    applicationinsights_connection_string: str | None = None
     local_storage_dir: str = "./.storage"
 
     # --- Business rules defaults (all editable from the admin dashboard) ------------
