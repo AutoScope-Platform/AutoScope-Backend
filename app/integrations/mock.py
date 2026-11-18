@@ -19,6 +19,8 @@ from app.integrations.base import (
     KycCheckResult,
     PaymentInit,
     PaymentVerification,
+    SocialIdentity,
+    SocialTokenError,
     VinInfo,
     WebhookEvent,
 )
@@ -137,6 +139,24 @@ class MockKyc:
         if "address" in name:
             return KycCheckResult(False, "Address could not be verified")
         return KycCheckResult(True)
+
+
+class MockSocial:
+    """Accepts tokens shaped ``mock:<subject>:<email>:<name>`` (email and name may be empty),
+    so the apps and tests can exercise Google/Apple sign-in without real accounts."""
+
+    def verify(self, provider: str, id_token: str, nonce: str | None = None) -> SocialIdentity:
+        parts = id_token.split(":", 3)
+        if len(parts) < 3 or parts[0] != "mock" or not parts[1]:
+            raise SocialTokenError("Not a mock social token")
+        name = parts[3] if len(parts) == 4 and parts[3] else None
+        return SocialIdentity(
+            provider=provider,
+            subject=parts[1],
+            email=parts[2].lower() or None,
+            email_verified=bool(parts[2]),
+            name=name,
+        )
 
 
 class MockVinDecoder:

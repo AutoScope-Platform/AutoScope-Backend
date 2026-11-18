@@ -212,6 +212,8 @@ def run(client: httpx.Client, log=print) -> None:
 
 
 if __name__ == "__main__":
+    # Windows consoles default to a code page without "₦"; print UTF-8 everywhere.
+    sys.stdout.reconfigure(encoding="utf-8")
     base = os.environ.get("BASE_URL", "http://localhost:8000")
     with httpx.Client(base_url=base, timeout=30) as http:
         try:

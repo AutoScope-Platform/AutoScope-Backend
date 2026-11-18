@@ -24,6 +24,7 @@ from app.core.errors import BadRequest, NotFound, UnprocessableEntity
 from app.core.events import Event, publish, subscribe
 from app.core.pagination import paginate_page
 from app.core.permissions import ADMIN_ROLES
+from app.core.uploads import checked_type
 from app.integrations import registry
 from app.modules.catalog import service as catalog
 from app.modules.catalog.models import Listing, ListingStatus, ListingType
@@ -415,8 +416,9 @@ def add_claim_document(
     claim = get_claim(db, claim_id, holder)
     if claim.claimant_id != holder.id:
         raise NotFound("Claim not found", code="claim_not_found")
-    if content_type not in CLAIM_FILE_TYPES:
-        raise BadRequest("Upload a JPEG, PNG or PDF", code="invalid_file_type")
+    content_type = checked_type(
+        data, CLAIM_FILE_TYPES, message="Upload a JPEG, PNG or PDF", code="invalid_file_type"
+    )
     if not data or len(data) > CLAIM_FILE_MAX:
         raise BadRequest("Files must be under 8 MB", code="file_too_large")
     key = f"claims/{claim.id}/{uuid.uuid4().hex}{CLAIM_FILE_TYPES[content_type]}"

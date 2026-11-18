@@ -112,6 +112,31 @@ class KycProvider(Protocol):
         """Automated ID check run before a human reviews the submission (FR-13.1)."""
 
 
+# --- Social sign-in (Google / Apple) ------------------------------------------------
+class SocialTokenError(IntegrationError):
+    """The ID token is forged, expired, for another app, or otherwise unusable."""
+
+
+@dataclass
+class SocialIdentity:
+    """Who the provider says signed in. Only built from a token whose signature was checked."""
+
+    provider: str  # "google" | "apple"
+    subject: str  # the provider's stable user id (`sub`)
+    email: str | None = None
+    email_verified: bool = False
+    name: str | None = None
+
+
+class SocialVerifier(Protocol):
+    def verify(self, provider: str, id_token: str, nonce: str | None = None) -> SocialIdentity:
+        """Check the token's signature, issuer, audience and expiry (and nonce if given).
+
+        Raises `SocialTokenError` for a bad token and `IntegrationError` when the provider
+        cannot be reached or sign-in with it is not configured.
+        """
+
+
 # --- Storage and lookups -------------------------------------------------------------
 class StorageProvider(Protocol):
     def put(self, key: str, data: bytes, content_type: str) -> None: ...

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base, Timestamps, UUIDPrimaryKey, enum_type, ref_column
@@ -38,6 +38,9 @@ class User(UUIDPrimaryKey, Timestamps, Base):
     email: Mapped[str | None] = mapped_column(String(254), unique=True)
     phone: Mapped[str | None] = mapped_column(String(20), unique=True)  # E.164, e.g. +2348012345678
     password_hash: Mapped[str] = mapped_column(String(255))
+    # False for accounts created through Google/Apple: they have a random hash nobody knows
+    # and must use "forgot password" to set one (FR-1.2).
+    has_password: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     city: Mapped[str | None] = mapped_column(String(80))
     status: Mapped[AccountStatus] = mapped_column(
         enum_type(AccountStatus), default=AccountStatus.ACTIVE, index=True
@@ -96,6 +99,7 @@ class OtpPurpose(StrEnum):
     VERIFY_CONTACT = "verify_contact"  # confirm the phone/email at sign-up
     LOGIN = "login"  # second factor at sign-in
     PASSWORD_RESET = "password_reset"
+    ACCOUNT_ERASURE = "account_erasure"  # confirms "delete my account"
 
 
 class OtpCode(UUIDPrimaryKey, Timestamps, Base):
@@ -110,6 +114,30 @@ class OtpCode(UUIDPrimaryKey, Timestamps, Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SocialProvider(StrEnum):
+    GOOGLE = "google"
+    APPLE = "apple"
+
+
+class SocialAccount(UUIDPrimaryKey, Timestamps, Base):
+    """A Google or Apple identity linked to a user (FR-1.2).
+
+    `subject` is the provider's stable user id (the token's `sub`), which never changes even
+    if the person changes their e-mail address, so sign-in matches on it, not on e-mail.
+    """
+
+    __tablename__ = "social_accounts"
+    __table_args__ = (UniqueConstraint("provider", "subject"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[SocialProvider] = mapped_column(enum_type(SocialProvider))
+    subject: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(254))  # as the provider reported it
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RefreshToken(UUIDPrimaryKey, Timestamps, Base):

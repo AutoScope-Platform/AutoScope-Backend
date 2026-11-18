@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     kyc_driver: Literal["mock"] = "mock"
     storage_driver: Literal["local", "s3"] = "local"
     vin_driver: Literal["mock", "nhtsa"] = "mock"
+    # Google/Apple sign-in (FR-1.2). "live" checks real ID tokens against the client ids below.
+    social_driver: Literal["mock", "live"] = "mock"
 
     # Fixed OTP accepted by the mock SMS driver so the demo and tests are repeatable.
     mock_otp_code: str = "123456"
@@ -78,6 +80,10 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     email_from: str = "AutoScope <no-reply@autoscope.ng>"
     fcm_service_account_json: str | None = None
+    # Comma-separated OAuth client ids whose ID tokens we accept. Google: the iOS, Android
+    # and web client ids. Apple: the iOS bundle id (and the Services id if web sign-in is added).
+    google_client_ids: str = ""
+    apple_client_ids: str = ""
     # S3-compatible object storage (Cloudflare R2, Neon storage, AWS S3, MinIO...).
     s3_endpoint_url: str | None = None
     s3_bucket: str | None = None
@@ -103,6 +109,14 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
+    def google_client_id_list(self) -> list[str]:
+        return [c.strip() for c in self.google_client_ids.split(",") if c.strip()]
+
+    @property
+    def apple_client_id_list(self) -> list[str]:
+        return [c.strip() for c in self.apple_client_ids.split(",") if c.strip()]
+
+    @property
     def is_production(self) -> bool:
         return self.env == "production"
 
@@ -120,6 +134,7 @@ class Settings(BaseSettings):
                 "PAYMENT_DRIVER": self.payment_driver,
                 "KYC_DRIVER": self.kyc_driver,
                 "VIN_DRIVER": self.vin_driver,
+                "SOCIAL_DRIVER": self.social_driver,
             }.items()
             if value == "mock"
         ]
