@@ -6,7 +6,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.modules.catalog.models import InquiryStatus, ListingStatus, ListingType
 
@@ -77,6 +77,26 @@ class ServiceRecordOut(_Orm):
 
 
 # --- Listings ----------------------------------------------------------------------------
+class FitmentIn(BaseModel):
+    """A vehicle range the part fits. Leave `model` out for every model of the make, and a
+    year bound out for "any year"."""
+
+    make: str = Field(min_length=1, max_length=60, examples=["Toyota"])
+    model: str | None = Field(None, max_length=60, examples=["Camry"])
+    year_from: int | None = Field(None, ge=1950, le=2100, examples=[2012])
+    year_to: int | None = Field(None, ge=1950, le=2100, examples=[2017])
+
+    @model_validator(mode="after")
+    def _years_in_order(self) -> FitmentIn:
+        if self.year_from and self.year_to and self.year_from > self.year_to:
+            raise ValueError("year_from must not be after year_to")
+        return self
+
+
+class FitmentOut(FitmentIn):
+    pass
+
+
 class ListingIn(BaseModel):
     type: ListingType
     title: str = Field(min_length=3, max_length=160, examples=["2018 Toyota Camry SE, low mileage"])
@@ -86,6 +106,10 @@ class ListingIn(BaseModel):
     latitude: float | None = Field(None, ge=-90, le=90)
     longitude: float | None = Field(None, ge=-180, le=180)
     stock: int | None = Field(None, ge=0, description="Units in stock (parts).")
+    sku: str | None = Field(None, max_length=64, description="Parts: your own stock code.")
+    fits: list[FitmentIn] | None = Field(
+        None, max_length=50, description="Parts: the vehicles this part fits (FR-4.1)."
+    )
     vin: str | None = Field(None, description="Vehicles only.")
     attributes: dict[str, Any] = Field(
         description="Type-specific details. Vehicles: make, model, year, mileage_km. "
@@ -102,6 +126,8 @@ class ListingUpdateIn(BaseModel):
     latitude: float | None = Field(None, ge=-90, le=90)
     longitude: float | None = Field(None, ge=-180, le=180)
     stock: int | None = Field(None, ge=0)
+    sku: str | None = Field(None, max_length=64)
+    fits: list[FitmentIn] | None = Field(None, max_length=50, description="Replaces the list.")
     vin: str | None = None
     attributes: dict[str, Any] | None = None
 
@@ -134,6 +160,8 @@ class ListingOut(BaseModel):
     latitude: float | None
     longitude: float | None
     stock: int | None
+    sku: str | None = None
+    fits: list[FitmentOut] = Field(default_factory=list)
     vin: str | None
     attributes: dict[str, Any]
     images: list[ImageOut]
@@ -161,8 +189,9 @@ class MechanicOut(BaseModel):
     city: str | None
     rating: float
     review_count: int
-    from_price_minor: int
-    services: int
+    from_price_minor: int = Field(description="Cheapest matching service, in kobo.")
+    services: int = Field(description="Number of matching live services.")
+    distance_km: float | None = Field(None, description="Nearest service, when searching near.")
 
 
 class MechanicPage(BaseModel):

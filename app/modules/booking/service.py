@@ -7,6 +7,10 @@ Lifecycle (status lives on the transaction):
                    (then the same as above)
     Either side can end it early: declined (before payment) or cancelled (refund if paid).
 
+Before the work starts the mechanic can propose a different time instead (FR-5.4). If the
+customer agrees, the booking moves; agreeing on a new *request* also confirms it, because
+proposing a time is the mechanic's way of accepting (FSD flow 9.1).
+
 The customer pays after the mechanic accepts (or the customer accepts the quote); the
 money is held in escrow until the work is completed and the dispute window has passed.
 """
@@ -35,6 +39,13 @@ LAGOS = timezone(timedelta(hours=1))
 SLOT_STEP_MINUTES = 30
 # Statuses in which a booking occupies the mechanic's time.
 BLOCKING = (TxStatus.REQUESTED, TxStatus.CONFIRMED, TxStatus.IN_PROGRESS)
+# Statuses in which the mechanic may still propose a different time (work not started).
+RESCHEDULABLE = (
+    TxStatus.REQUESTED,
+    TxStatus.QUOTE_REQUESTED,
+    TxStatus.QUOTE_SENT,
+    TxStatus.CONFIRMED,
+)
 
 
 # ======================================================================================
@@ -128,6 +139,23 @@ def _mechanic(db: Session, mechanic_id: uuid.UUID) -> User:
     return user
 
 
+def _check_time(
+    db: Session,
+    mechanic_id: uuid.UUID,
+    start: datetime,
+    minutes: int,
+    *,
+    ignore: uuid.UUID | None = None,
+) -> None:
+    """The time must be in the future, inside working hours, and free."""
+    if start <= utcnow():
+        raise BadRequest("Pick a time in the future", code="invalid_time")
+    if not _inside_hours(db, mechanic_id, start, minutes):
+        raise UnprocessableEntity("The mechanic is not working at that time", code="outside_hours")
+    if _overlaps(db, mechanic_id, start, minutes, ignore=ignore):
+        raise Conflict("That time is already booked", code="slot_taken")
+
+
 def request_booking(
     db: Session,
     customer: User,
@@ -161,12 +189,7 @@ def request_booking(
     quote = quote_requested or listing is None
     minutes = int((listing.attributes or {}).get("duration_minutes", 60)) if listing else 60
 
-    if scheduled_for <= utcnow():
-        raise BadRequest("Pick a time in the future", code="invalid_time")
-    if not _inside_hours(db, mechanic.id, scheduled_for, minutes):
-        raise UnprocessableEntity("The mechanic is not working at that time", code="outside_hours")
-    if _overlaps(db, mechanic.id, scheduled_for, minutes):
-        raise Conflict("That time is already booked", code="slot_taken")
+    _check_time(db, mechanic.id, scheduled_for, minutes)
 
     tx = payments.create_transaction(
         db,
@@ -254,6 +277,7 @@ def accept_booking(db: Session, mechanic: User, booking_id: uuid.UUID) -> Bookin
     ):
         raise Conflict("You have another booking at that time", code="slot_taken")
     tx.status = TxStatus.CONFIRMED
+    booking.proposed_for = booking.proposal_note = None  # the original time stands
     payments.request_payment(db, tx)
     db.commit()
     publish(
@@ -300,6 +324,30 @@ def send_quote(
     db.commit()
     publish(
         "booking.quoted",
+        booking_id=str(booking.id),
+        customer_id=str(booking.customer_id),
+        ref=tx.ref,
+    )
+    return booking
+
+
+def propose_time(
+    db: Session,
+    mechanic: User,
+    booking_id: uuid.UUID,
+    scheduled_for: datetime,
+    note: str | None,
+) -> Booking:
+    """Suggest a different time (FR-5.4). Replaces any earlier suggestion."""
+    booking, tx = _mechanic_booking(db, mechanic, booking_id)
+    _need(tx, *RESCHEDULABLE)
+    if scheduled_for == booking.scheduled_for:
+        raise BadRequest("That is already the booked time", code="same_time")
+    _check_time(db, mechanic.id, scheduled_for, booking.duration_minutes, ignore=booking.id)
+    booking.proposed_for, booking.proposal_note = scheduled_for, note
+    db.commit()
+    publish(
+        "booking.time_proposed",
         booking_id=str(booking.id),
         customer_id=str(booking.customer_id),
         ref=tx.ref,
@@ -376,6 +424,36 @@ def answer_quote(db: Session, customer: User, booking_id: uuid.UUID, accept: boo
     db.commit()
     publish(
         "booking.quote_answered", booking_id=str(booking.id), mechanic_id=str(booking.mechanic_id),
+        accepted=accept, ref=tx.ref,
+    )  # fmt: skip
+    return booking
+
+
+def answer_proposed_time(
+    db: Session, customer: User, booking_id: uuid.UUID, accept: bool
+) -> Booking:
+    """Agree to (or turn down) the mechanic's suggested time.
+
+    Turning it down keeps the original time and status; either side can then cancel, or
+    the mechanic can accept the original time or suggest another.
+    """
+    booking, tx = _customer_booking(db, customer, booking_id)
+    if booking.proposed_for is None:
+        raise UnprocessableEntity("There is no new time to answer", code="no_proposal")
+    _need(tx, *RESCHEDULABLE)
+    if accept:
+        _check_time(
+            db, booking.mechanic_id, booking.proposed_for, booking.duration_minutes,
+            ignore=booking.id,
+        )  # fmt: skip
+        booking.scheduled_for = booking.proposed_for
+        if tx.status == TxStatus.REQUESTED:
+            tx.status = TxStatus.CONFIRMED
+            payments.request_payment(db, tx)
+    booking.proposed_for = booking.proposal_note = None
+    db.commit()
+    publish(
+        "booking.time_answered", booking_id=str(booking.id), mechanic_id=str(booking.mechanic_id),
         accepted=accept, ref=tx.ref,
     )  # fmt: skip
     return booking

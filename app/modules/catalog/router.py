@@ -15,6 +15,7 @@ from app.modules.catalog import service
 from app.modules.catalog.models import Listing, ListingStatus, ListingType
 from app.modules.catalog.schemas import (
     DecideIn,
+    FitmentOut,
     ImageOut,
     InquiryAnswerIn,
     InquiryIn,
@@ -66,6 +67,8 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
                 id=r.id, ref=r.ref, type=r.type, status=r.status, title=r.title,
                 description=r.description, price_minor=r.price_minor, currency=r.currency,
                 city=r.city, latitude=r.latitude, longitude=r.longitude, stock=r.stock,
+                sku=r.sku,
+                fits=[FitmentOut(make=f.make, model=f.model, year_from=f.year_from, year_to=f.year_to) for f in r.fitments],
                 vin=r.vin, attributes=r.attributes, created_at=r.created_at,
                 images=[ImageOut(id=i.id, url=service.image_url(i), position=i.position) for i in r.images],
                 seller=SellerOut(
@@ -169,7 +172,11 @@ def _near(lat: float | None, lng: float | None) -> tuple[float, float] | None:
     response_model=ListingPage,
     summary="Search listings (vehicles, parts, services, insurance)",
     description="Public. Pass `lat` and `lng` to filter by distance (`radius_km`) with "
-    "`sort=distance`. `counts_by_type` ignores the `type` filter so apps can show tab counts.",
+    "`sort=distance`. `counts_by_type` ignores the `type` filter so apps can show tab counts.\n\n"
+    "Vehicles: `make`, `model`, `year_min`/`year_max`, `condition` (FR-3.2). Parts that fit a "
+    "vehicle (FR-4.2): `vehicle_id` (a car in your garage, signed in) or `fits_make` with "
+    "optional `fits_model` and `fits_year`. `q` also matches a part's SKU.",
+    responses=error_responses(400, 401, 404),
 )
 def search(
     viewer: OptionalUser,
@@ -179,8 +186,14 @@ def search(
     min_price: int | None = Query(None, ge=0),
     max_price: int | None = Query(None, ge=0),
     make: str | None = None,
+    model: str | None = None,
+    condition: str | None = Query(None, examples=["used"]),
     year_min: int | None = None,
     year_max: int | None = None,
+    vehicle_id: uuid.UUID | None = Query(None, description="Parts that fit this garage vehicle."),
+    fits_make: str | None = None,
+    fits_model: str | None = None,
+    fits_year: int | None = Query(None, ge=1950, le=2100),
     seller_id: uuid.UUID | None = None,
     lat: float | None = Query(None, ge=-90, le=90),
     lng: float | None = Query(None, ge=-180, le=180),
@@ -190,10 +203,14 @@ def search(
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> ListingPage:
+    fits = service.fitment_query(
+        db, viewer, vehicle_id=vehicle_id, make=fits_make, model=fits_model, year=fits_year
+    )
     rows, total, counts = service.search_listings(
         db, q=q, type_=type, city=city, min_price=min_price, max_price=max_price, make=make,
-        year_min=year_min, year_max=year_max, seller_id=seller_id, near=_near(lat, lng),
-        radius_km=radius_km, sort=sort, page=page, page_size=page_size,
+        model=model, condition=condition, year_min=year_min, year_max=year_max, fits=fits,
+        seller_id=seller_id, near=_near(lat, lng), radius_km=radius_km, sort=sort, page=page,
+        page_size=page_size,
     )  # fmt: skip
     return ListingPage(
         items=_listings_out(db, rows, viewer), total=total, page=page, page_size=page_size,
@@ -205,26 +222,37 @@ def search(
     "/mechanics",
     response_model=MechanicPage,
     summary="Find verified mechanics",
-    description="Mechanics with at least one live service, best rated first.",
+    description="Mechanics with at least one live service matching the filters (FR-5.2). "
+    "`service` matches a service's title or category (e.g. `brakes`); `min_price`/`max_price` "
+    "apply to each service, in kobo. Sort by `rating` (default), `price` (cheapest matching "
+    "service) or `distance` (needs `lat` and `lng`).",
 )
 def mechanics(
+    service_q: str | None = Query(None, alias="service", examples=["brakes"]),
+    min_price: int | None = Query(None, ge=0),
+    max_price: int | None = Query(None, ge=0),
+    min_rating: float | None = Query(None, ge=0, le=5),
     city: str | None = None,
     lat: float | None = Query(None, ge=-90, le=90),
     lng: float | None = Query(None, ge=-180, le=180),
     radius_km: float = Query(25, gt=0, le=2000),
+    sort: str = Query("rating", pattern="^(rating|price|distance)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> MechanicPage:
     items, total = service.mechanic_directory(
-        db, city=city, near=_near(lat, lng), radius_km=radius_km, page=page, page_size=page_size
-    )
+        db, city=city, near=_near(lat, lng), radius_km=radius_km, page=page, page_size=page_size,
+        service=service_q, min_price=min_price, max_price=max_price, min_rating=min_rating,
+        sort=sort,
+    )  # fmt: skip
     return MechanicPage(
         items=[
             MechanicOut(
                 id=i["user"].id, name=i["user"].display_name, city=i["user"].city,
                 rating=i["rating"], review_count=i["review_count"],
                 from_price_minor=i["from_price_minor"], services=i["services"],
+                distance_km=i["distance_km"],
             )
             for i in items
         ],

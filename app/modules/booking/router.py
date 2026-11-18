@@ -19,10 +19,12 @@ from app.modules.booking.schemas import (
     BookingOut,
     InvoiceOut,
     LineOut,
+    ProposeTimeIn,
     QuoteAnswerIn,
     QuoteIn,
     ReasonIn,
     SlotsOut,
+    TimeAnswerIn,
     WindowOut,
 )
 from app.modules.identity.deps import CurrentUser, require_capability
@@ -45,6 +47,7 @@ def _out(db: Session, booking: Booking, tx=None) -> BookingOut:
         description=booking.description, scheduled_for=booking.scheduled_for,
         duration_minutes=booking.duration_minutes, quote_requested=booking.quote_requested,
         quote_note=booking.quote_note, decline_reason=booking.decline_reason,
+        proposed_for=booking.proposed_for, proposal_note=booking.proposal_note,
         lines=[LineOut(description=li.description, amount_minor=li.amount_minor) for li in booking.lines],
         created_at=booking.created_at,
     )  # fmt: skip
@@ -149,6 +152,20 @@ def answer_quote(
 
 
 @router.post(
+    "/bookings/{booking_id}/proposed-time/answer",
+    response_model=BookingOut,
+    summary="Customer: accept or turn down the mechanic's suggested time",
+    description="Accepting a suggestion on a new request also confirms the booking (the "
+    "customer is then asked to pay). Turning it down keeps the original time.",
+    responses=error_responses(404, 409, 422),
+)
+def answer_time(
+    booking_id: uuid.UUID, body: TimeAnswerIn, user: CurrentUser, db: Session = Depends(get_db)
+):
+    return _out(db, service.answer_proposed_time(db, user, booking_id, body.accept))
+
+
+@router.post(
     "/bookings/{booking_id}/cancel",
     response_model=BookingOut,
     summary="Cancel before the work starts (paid bookings are refunded)",
@@ -179,6 +196,20 @@ def decline(
     booking_id: uuid.UUID, body: ReasonIn, user: User = Mechanic, db: Session = Depends(get_db)
 ):
     return _out(db, service.decline_booking(db, user, booking_id, body.reason))
+
+
+@router.put(
+    "/bookings/{booking_id}/proposed-time",
+    response_model=BookingOut,
+    summary="Mechanic: suggest a different time (FR-5.4)",
+    description="Possible until the work starts. The new time must be inside your working "
+    "hours and free. The customer accepts or turns it down.",
+    responses=error_responses(400, 404, 409, 422),
+)
+def propose_time(
+    booking_id: uuid.UUID, body: ProposeTimeIn, user: User = Mechanic, db: Session = Depends(get_db)
+):
+    return _out(db, service.propose_time(db, user, booking_id, body.scheduled_for, body.note))
 
 
 @router.put(

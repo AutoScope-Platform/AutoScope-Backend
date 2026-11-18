@@ -409,6 +409,15 @@ RULES: dict[str, Rule] = {
     "booking.quote_answered": _booking(
         "Quote answered", "{ref}: the customer answered your quote.", "mechanic_id"
     ),
+    "booking.time_proposed": _booking(
+        "New time suggested",
+        "{ref}: the mechanic suggested a different time. Please accept or decline it.",
+        "customer_id",
+        ("push", "sms"),
+    ),
+    "booking.time_answered": _booking(
+        "Time answered", "{ref}: the customer answered your suggested time.", "mechanic_id"
+    ),
     "booking.started": _booking("Work started", "{ref}: the mechanic started work.", "customer_id"),
     "booking.completed": _booking(
         "Work completed", "{ref} is done. Please leave a review.", "customer_id", ("push", "email")

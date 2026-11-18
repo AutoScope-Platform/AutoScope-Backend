@@ -8,6 +8,10 @@ handover) and the listing goes reserved -> sold.
 
 Stock is taken at checkout (under a row lock so two buyers cannot take the last unit)
 and given back on cancellation.
+
+Delivery (FR-4.3): each seller's order adds that seller's delivery fee, worked out from
+their `DeliverySettings` and the buyer's delivery city. The fee is part of the order's
+transaction amount, so it is paid, held in escrow and refunded with the parts.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from app.modules.catalog.models import (
     ListingType,
 )
 from app.modules.identity.models import User
-from app.modules.orders.models import CartItem, Order, OrderItem
+from app.modules.orders.models import CartItem, DeliverySettings, Order, OrderItem
 from app.modules.payments import service as payments
 from app.modules.payments.models import FINAL_STATUSES, Transaction, TransactionKind, TxStatus
 
@@ -92,6 +96,85 @@ def clear_cart(db: Session, buyer: User) -> None:
 
 
 # ======================================================================================
+# Delivery fees (FR-4.3)
+# ======================================================================================
+def get_delivery_settings(db: Session, seller_id: uuid.UUID) -> DeliverySettings | None:
+    return db.scalar(select(DeliverySettings).where(DeliverySettings.seller_id == seller_id))
+
+
+def set_delivery_settings(
+    db: Session,
+    seller: User,
+    *,
+    same_city_fee_minor: int,
+    other_city_fee_minor: int,
+    free_over_minor: int | None,
+) -> DeliverySettings:
+    settings = get_delivery_settings(db, seller.id) or DeliverySettings(seller_id=seller.id)
+    settings.same_city_fee_minor = same_city_fee_minor
+    settings.other_city_fee_minor = other_city_fee_minor
+    settings.free_over_minor = free_over_minor
+    db.add(settings)
+    db.commit()
+    return settings
+
+
+def _same_city(a: str | None, b: str | None) -> bool:
+    return bool(a and b and a.strip().casefold() == b.strip().casefold())
+
+
+def delivery_fee(
+    settings: DeliverySettings | None,
+    *,
+    seller_city: str | None,
+    delivery_city: str | None,
+    subtotal_minor: int,
+) -> int:
+    """The fee for one seller's part of an order. Without a delivery city the other-city
+    fee applies, so the buyer is never charged less than the seller expects."""
+    if settings is None:
+        return 0
+    if settings.free_over_minor is not None and subtotal_minor >= settings.free_over_minor:
+        return 0
+    if _same_city(seller_city, delivery_city):
+        return settings.same_city_fee_minor
+    return settings.other_city_fee_minor
+
+
+def _seller_city(seller: User | None, listings: list[Listing]) -> str | None:
+    """Where the seller ships from: their profile city, else the city on their listing."""
+    if seller and seller.city:
+        return seller.city
+    return next((listing.city for listing in listings if listing.city), None)
+
+
+def cart_by_seller(db: Session, buyer: User, delivery_city: str | None) -> list[dict]:
+    """The cart grouped per seller with each seller's delivery fee, for the cart screen."""
+    groups: dict[uuid.UUID, list[tuple[CartItem, Listing]]] = {}
+    for item, listing in get_cart(db, buyer):
+        groups.setdefault(listing.seller_id, []).append((item, listing))
+    out = []
+    for seller_id, rows in groups.items():
+        seller = db.get(User, seller_id)
+        settings = get_delivery_settings(db, seller_id)
+        subtotal = sum(listing.price_minor * item.quantity for item, listing in rows)
+        out.append(
+            {
+                "seller": seller,
+                "subtotal_minor": subtotal,
+                "delivery_fee_minor": delivery_fee(
+                    settings,
+                    seller_city=_seller_city(seller, [listing for _, listing in rows]),
+                    delivery_city=delivery_city,
+                    subtotal_minor=subtotal,
+                ),
+                "free_delivery_over_minor": settings.free_over_minor if settings else None,
+            }
+        )
+    return out
+
+
+# ======================================================================================
 # Checkout
 # ======================================================================================
 def checkout(
@@ -133,12 +216,18 @@ def checkout(
     orders: list[Order] = []
     for seller_id, lines in by_seller.items():
         subtotal = sum(listing.price_minor * qty for listing, qty in lines)
+        fee = delivery_fee(
+            get_delivery_settings(db, seller_id),
+            seller_city=_seller_city(db.get(User, seller_id), [listing for listing, _ in lines]),
+            delivery_city=delivery_city,
+            subtotal_minor=subtotal,
+        )
         tx = payments.create_transaction(
             db,
             kind=TransactionKind.PARTS_ORDER,
             customer_id=buyer.id,
             provider_id=seller_id,
-            amount_minor=subtotal,
+            amount_minor=subtotal + fee,
             payment_due=True,
         )
         order = Order(
@@ -148,6 +237,7 @@ def checkout(
             delivery_address=delivery_address.strip(),
             delivery_city=delivery_city,
             contact_phone=contact_phone,
+            delivery_fee_minor=fee,
         )
         for listing, qty in lines:
             order.items.append(
