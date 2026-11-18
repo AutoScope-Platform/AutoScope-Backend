@@ -123,6 +123,8 @@ class Listing(UUIDPrimaryKey, Timestamps, Base):
     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     # Units in stock (parts). None means "not tracked".
     stock: Mapped[int | None] = mapped_column(Integer)
+    # Parts: the seller's own stock-keeping code, unique among their active listings.
+    sku: Mapped[str | None] = mapped_column(String(64), index=True)
     vin: Mapped[str | None] = mapped_column(String(17), index=True)
     # Warnings shown to the reviewing admin: duplicate_vin, contact_details, duplicate_photos.
     fraud_signals: Mapped[list[str]] = mapped_column(JSONB, default=list)
@@ -134,6 +136,10 @@ class Listing(UUIDPrimaryKey, Timestamps, Base):
 
     images: Mapped[list[ListingImage]] = relationship(
         back_populates="listing", cascade="all, delete-orphan", order_by="ListingImage.position"
+    )
+    # Parts only: which vehicles the part fits (FR-4.1).
+    fitments: Mapped[list[PartFitment]] = relationship(
+        back_populates="listing", cascade="all, delete-orphan", order_by="PartFitment.make"
     )
 
     @property
@@ -153,6 +159,26 @@ class ListingImage(UUIDPrimaryKey, Timestamps, Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
 
     listing: Mapped[Listing] = relationship(back_populates="images")
+
+
+class PartFitment(UUIDPrimaryKey, Base):
+    """One vehicle range a part fits, e.g. Toyota Camry 2012-2017 (FR-4.1, FR-4.2).
+
+    `model` empty means every model of the make; an empty year bound is open-ended. A
+    part can have several rows (the same brake pad often fits a Camry and a Venza).
+    """
+
+    __tablename__ = "part_fitments"
+
+    listing_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("listings.id", ondelete="CASCADE"), index=True
+    )
+    make: Mapped[str] = mapped_column(String(60), index=True)
+    model: Mapped[str | None] = mapped_column(String(60))
+    year_from: Mapped[int | None] = mapped_column(Integer)
+    year_to: Mapped[int | None] = mapped_column(Integer)
+
+    listing: Mapped[Listing] = relationship(back_populates="fitments")
 
 
 # --- Inquiries and offers -------------------------------------------------------------

@@ -69,6 +69,23 @@ class QuoteAnswerIn(BaseModel):
     accept: bool
 
 
+class ProposeTimeIn(BaseModel):
+    scheduled_for: datetime = Field(description="New start time, with a timezone offset.")
+    note: str | None = Field(None, max_length=300, examples=["I am fully booked that morning"])
+
+    @model_validator(mode="after")
+    def _tz(self) -> ProposeTimeIn:
+        if self.scheduled_for.tzinfo is None:
+            raise ValueError(
+                "scheduled_for needs a timezone offset, e.g. 2026-12-01T10:00:00+01:00"
+            )
+        return self
+
+
+class TimeAnswerIn(BaseModel):
+    accept: bool
+
+
 class LineOut(BaseModel):
     description: str
     amount_minor: int
@@ -92,6 +109,10 @@ class BookingOut(BaseModel):
     quote_requested: bool
     quote_note: str | None
     decline_reason: str | None
+    proposed_for: datetime | None = Field(
+        None, description="A new time the mechanic suggested, waiting for the customer."
+    )
+    proposal_note: str | None = None
     lines: list[LineOut]
     created_at: datetime
 

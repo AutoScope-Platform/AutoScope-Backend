@@ -17,13 +17,20 @@ import uuid
 from datetime import date
 
 from geoalchemy2 import WKTElement
-from sqlalchemy import Integer, cast, func, or_, select
+from sqlalchemy import Float, Integer, cast, func, null, or_, select
 from sqlalchemy.orm import Session
 
 from app.core import audit
 from app.core.audit import AuditCategory
 from app.core.db import utcnow
-from app.core.errors import BadRequest, Conflict, Forbidden, NotFound, UnprocessableEntity
+from app.core.errors import (
+    BadRequest,
+    Conflict,
+    Forbidden,
+    NotFound,
+    Unauthorized,
+    UnprocessableEntity,
+)
 from app.core.events import publish
 from app.core.pagination import paginate_page
 from app.core.permissions import ADMIN_ROLES, Capability, Role, has_capability
@@ -38,6 +45,7 @@ from app.modules.catalog.models import (
     ListingInquiry,
     ListingStatus,
     ListingType,
+    PartFitment,
     ServiceRecord,
     Vehicle,
 )
@@ -175,6 +183,47 @@ def _check_attributes(type_: ListingType, attributes: dict) -> None:
         )
 
 
+def _check_part_fields(type_: ListingType, sku: str | None, fits: list | None) -> None:
+    if type_ != ListingType.PART and (sku or fits):
+        raise UnprocessableEntity(
+            "A SKU and vehicle fitment can only be given for parts", code="parts_only"
+        )
+
+
+def _clean_sku(sku: str | None) -> str | None:
+    return (sku or "").strip() or None
+
+
+def _check_sku_free(
+    db: Session, seller_id: uuid.UUID, sku: str | None, listing_id: uuid.UUID | None = None
+) -> None:
+    """A seller's SKUs identify their stock, so two active listings cannot share one."""
+    if not sku:
+        return
+    stmt = select(Listing.id).where(
+        Listing.seller_id == seller_id,
+        func.lower(Listing.sku) == sku.lower(),
+        Listing.status != ListingStatus.REMOVED,
+    )
+    if listing_id:
+        stmt = stmt.where(Listing.id != listing_id)
+    if db.scalar(stmt):
+        raise Conflict("You already have a listing with this SKU", code="duplicate_sku")
+
+
+def _set_fitments(listing: Listing, fits: list[dict]) -> None:
+    listing.fitments.clear()
+    for f in fits:
+        listing.fitments.append(
+            PartFitment(
+                make=f["make"].strip(),
+                model=(f.get("model") or "").strip() or None,
+                year_from=f.get("year_from"),
+                year_to=f.get("year_to"),
+            )
+        )
+
+
 def _set_location(listing: Listing, latitude: float | None, longitude: float | None) -> None:
     """Keep the plain coordinates and the PostGIS point in step."""
     listing.latitude, listing.longitude = latitude, longitude
@@ -256,10 +305,15 @@ def create_listing(db: Session, seller: User, data: dict) -> Listing:
     if not has_capability(seller.active_roles, CAPABILITY_FOR_TYPE[type_]):
         raise Forbidden("Your account type cannot create this kind of listing", code="forbidden")
     _check_attributes(type_, data["attributes"])
+    fits = data.pop("fits", None) or []
+    data["sku"] = _clean_sku(data.pop("sku", None))
+    _check_part_fields(type_, data["sku"], fits)
+    _check_sku_free(db, seller.id, data["sku"])
     if data.get("vin"):
         data["vin"] = normalise_vin(data["vin"])
     latitude, longitude = data.pop("latitude", None), data.pop("longitude", None)
     listing = Listing(seller_id=seller.id, city=data.pop("city", None) or seller.city, **data)
+    _set_fitments(listing, fits)
     _set_location(listing, latitude, longitude)
     db.add(listing)
     _refresh_signals(db, listing)
@@ -274,6 +328,13 @@ def update_listing(db: Session, seller: User, listing_id: uuid.UUID, changes: di
         raise UnprocessableEntity("This listing can no longer be edited", code="not_editable")
     if "attributes" in changes:
         _check_attributes(listing.type, changes["attributes"])
+    if "sku" in changes:
+        changes["sku"] = _clean_sku(changes["sku"])
+    _check_part_fields(listing.type, changes.get("sku"), changes.get("fits"))
+    if changes.get("sku"):
+        _check_sku_free(db, seller.id, changes["sku"], listing.id)
+    if "fits" in changes:
+        _set_fitments(listing, changes.pop("fits") or [])
     if changes.get("vin"):
         changes["vin"] = normalise_vin(changes["vin"])
     if "latitude" in changes or "longitude" in changes:
@@ -388,8 +449,11 @@ def search_listings(
     min_price: int | None = None,
     max_price: int | None = None,
     make: str | None = None,
+    model: str | None = None,
+    condition: str | None = None,
     year_min: int | None = None,
     year_max: int | None = None,
+    fits: tuple[str, str | None, int | None] | None = None,  # (make, model, year)
     seller_id: uuid.UUID | None = None,
     near: tuple[float, float] | None = None,  # (latitude, longitude)
     radius_km: float = 25,
@@ -406,7 +470,9 @@ def search_listings(
     stmt = select(Listing).where(Listing.status.in_([ListingStatus.LIVE, ListingStatus.RESERVED]))
     if q:
         like = f"%{q.strip()}%"
-        stmt = stmt.where(or_(Listing.title.ilike(like), Listing.description.ilike(like)))
+        stmt = stmt.where(
+            or_(Listing.title.ilike(like), Listing.description.ilike(like), Listing.sku.ilike(like))
+        )
     if city:
         stmt = stmt.where(Listing.city.ilike(city.strip()))
     if min_price is not None:
@@ -417,6 +483,12 @@ def search_listings(
         stmt = stmt.where(Listing.seller_id == seller_id)
     if make:
         stmt = stmt.where(Listing.attributes["make"].astext.ilike(make.strip()))
+    if model:
+        stmt = stmt.where(Listing.attributes["model"].astext.ilike(model.strip()))
+    if condition:
+        stmt = stmt.where(Listing.attributes["condition"].astext.ilike(condition.strip()))
+    if fits:
+        stmt = stmt.where(_fits_clause(*fits))
     year = cast(Listing.attributes["year"].astext, Integer)
     if year_min is not None:
         stmt = stmt.where(year >= year_min)
@@ -448,12 +520,58 @@ def search_listings(
     return rows, total, counts
 
 
+def _fits_clause(make: str, model: str | None, year: int | None):
+    """Parts with a fitment row covering this vehicle (FR-4.2). A row with no model fits
+    every model of the make; a missing year bound is open-ended."""
+    fit = select(PartFitment.id).where(
+        PartFitment.listing_id == Listing.id, PartFitment.make.ilike(make.strip())
+    )
+    if model:
+        fit = fit.where(or_(PartFitment.model.is_(None), PartFitment.model.ilike(model.strip())))
+    if year is not None:
+        fit = fit.where(
+            or_(PartFitment.year_from.is_(None), PartFitment.year_from <= year),
+            or_(PartFitment.year_to.is_(None), PartFitment.year_to >= year),
+        )
+    return fit.exists()
+
+
+def fitment_query(
+    db: Session,
+    viewer: User | None,
+    *,
+    vehicle_id: uuid.UUID | None,
+    make: str | None,
+    model: str | None,
+    year: int | None,
+) -> tuple[str, str | None, int | None] | None:
+    """Turn the "fits my vehicle" search options into (make, model, year), or None.
+
+    `vehicle_id` picks a car from the signed-in owner's garage and wins over the rest.
+    """
+    if vehicle_id:
+        if viewer is None:
+            raise Unauthorized(
+                "Sign in to search by a vehicle in your garage", code="not_authenticated"
+            )
+        vehicle = get_vehicle(db, viewer, vehicle_id)
+        return vehicle.make, vehicle.model, vehicle.year
+    if make:
+        return make, model, year
+    if model or year is not None:
+        raise BadRequest("Give fits_make with fits_model or fits_year", code="fits_make_required")
+    return None
+
+
 def _counts_by_type(db: Session, filtered) -> dict[str, int]:
     sub = filtered.subquery()
     rows = db.execute(select(sub.c.type, func.count()).group_by(sub.c.type)).all()
     counts = {t.value: 0 for t in ListingType}
     counts.update({str(t): n for t, n in rows})
     return counts
+
+
+MECHANIC_SORTS = ("rating", "price", "distance")
 
 
 def mechanic_directory(
@@ -464,45 +582,88 @@ def mechanic_directory(
     radius_km: float,
     page: int,
     page_size: int,
+    service: str | None = None,
+    min_price: int | None = None,
+    max_price: int | None = None,
+    min_rating: float | None = None,
+    sort: str = "rating",
 ) -> tuple[list[dict], int]:
-    """Verified mechanics with at least one live service, best rated first (FR-4.1).
+    """Verified mechanics with at least one live service matching the filters (FR-5.2).
 
-    Returns plain dicts: user, rating, starting price and number of services.
+    `service` matches a service's title or category; the price filters apply to each
+    service, and `from_price_minor` is the cheapest *matching* one. Sorting happens in SQL
+    so it is right across pages: best rated (default), cheapest, or nearest (needs `near`).
+    Returns plain dicts: user, rating, review count, starting price, services, distance.
     """
-    live_services = select(Listing).where(
+    # Postgres cannot take min() of an untyped NULL, so the "no distance" column is a Float.
+    distance = cast(null(), Float)
+    services = select(Listing.seller_id, Listing.price_minor).where(
         Listing.type == ListingType.MECHANIC_SERVICE, Listing.status == ListingStatus.LIVE
     )
+    if service:
+        like = f"%{service.strip()}%"
+        services = services.where(
+            or_(Listing.title.ilike(like), Listing.attributes["category"].astext.ilike(like))
+        )
+    if min_price is not None:
+        services = services.where(Listing.price_minor >= min_price)
+    if max_price is not None:
+        services = services.where(Listing.price_minor <= max_price)
     if city:
-        live_services = live_services.where(Listing.city.ilike(city.strip()))
+        services = services.where(Listing.city.ilike(city.strip()))
     if near:
         point = func.ST_GeogFromText(f"SRID=4326;POINT({near[1]} {near[0]})")
-        live_services = live_services.where(Listing.location.is_not(None)).where(
+        distance = func.ST_Distance(Listing.location, point)
+        services = services.where(Listing.location.is_not(None)).where(
             func.ST_DWithin(Listing.location, point, radius_km * 1000)
         )
-    sub = live_services.subquery()
+    sub = services.add_columns(distance.label("distance")).subquery()
+    per_mechanic = (
+        select(
+            sub.c.seller_id,
+            func.min(sub.c.price_minor).label("from_price"),
+            func.count().label("services"),
+            func.min(sub.c.distance).label("distance"),
+        )
+        .group_by(sub.c.seller_id)
+        .subquery()
+    )
+    ratings = reviews.rating_summary_subquery()
+    rating = func.coalesce(ratings.c.average, 0.0)
+    review_count = func.coalesce(ratings.c.count, 0)
     stmt = (
-        select(User, func.min(sub.c.price_minor), func.count(sub.c.id))
-        .join(sub, sub.c.seller_id == User.id)
+        select(
+            User, per_mechanic.c.from_price, per_mechanic.c.services, per_mechanic.c.distance,
+            rating, review_count,
+        )
+        .join(per_mechanic, per_mechanic.c.seller_id == User.id)
+        .outerjoin(ratings, ratings.c.user_id == User.id)
         .join(UserRole, (UserRole.user_id == User.id) & (UserRole.role == Role.MECHANIC))
         .where(UserRole.active.is_(True), User.kyc_status == KycStatus.APPROVED)
-        .group_by(User.id)
-        .order_by(User.created_at)
-    )
-    total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+    )  # fmt: skip
+    if min_rating is not None:
+        stmt = stmt.where(rating >= min_rating)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+
+    by_rating = (rating.desc(), review_count.desc(), User.created_at, User.id)
+    if sort == "price":
+        stmt = stmt.order_by(per_mechanic.c.from_price.asc(), *by_rating)
+    elif sort == "distance" and near:
+        stmt = stmt.order_by(per_mechanic.c.distance.asc(), *by_rating)
+    else:
+        stmt = stmt.order_by(*by_rating)
     rows = db.execute(stmt.limit(page_size).offset((max(page, 1) - 1) * page_size)).all()
-    ratings = reviews.ratings_for(db, [u.id for u, _, _ in rows])
-    items = [
+    return [
         {
             "user": u,
-            "rating": ratings.get(u.id, (0.0, 0))[0],
-            "review_count": ratings.get(u.id, (0.0, 0))[1],
+            "rating": round(float(avg), 1),
+            "review_count": int(count),
             "from_price_minor": price,
             "services": n,
+            "distance_km": round(dist / 1000, 1) if dist is not None else None,
         }
-        for u, price, n in rows
-    ]
-    items.sort(key=lambda i: (-i["rating"], -i["review_count"]))
-    return items, total
+        for u, price, n, dist, avg, count in rows
+    ], total
 
 
 # ======================================================================================

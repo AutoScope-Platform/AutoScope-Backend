@@ -65,6 +65,10 @@ class Booking(UUIDPrimaryKey, Timestamps, Base):
     quote_note: Mapped[str | None] = mapped_column(String(500))
     decline_reason: Mapped[str | None] = mapped_column(String(300))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A different time the mechanic suggested (FR-5.4), waiting for the customer's answer.
+    # It does not hold the slot: availability is checked again when the customer accepts.
+    proposed_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proposal_note: Mapped[str | None] = mapped_column(String(300))
 
     lines: Mapped[list[BookingLine]] = relationship(
         back_populates="booking", cascade="all, delete-orphan", order_by="BookingLine.position"
