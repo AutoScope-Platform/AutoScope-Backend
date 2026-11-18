@@ -24,7 +24,16 @@ jobs:
       # The migration must build the same schema the models describe.
       - name: Migrations match models
         env: { DATABASE_URL: "postgresql://autoscope:autoscope@127.0.0.1:5432/autoscope_test" }
+        # Start from an empty schema. (The old one-liner kept no reference to the context
+        # manager from `e.begin()`, so the connection was closed before it was used.)
         run: |
-          uv run python -c "from sqlalchemy import create_engine, text; e=create_engine('postgresql+psycopg://autoscope:autoscope@127.0.0.1:5432/autoscope_test'); c=e.begin().__enter__(); c.execute(text('DROP SCHEMA public CASCADE')); c.execute(text('CREATE SCHEMA public')); c.commit()"
+          uv run python - <<'PY'
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine("postgresql+psycopg://autoscope:autoscope@127.0.0.1:5432/autoscope_test")
+          with engine.begin() as conn:
+              conn.execute(text("DROP SCHEMA public CASCADE"))
+              conn.execute(text("CREATE SCHEMA public"))
+          PY
           uv run alembic upgrade head
           uv run alembic check
