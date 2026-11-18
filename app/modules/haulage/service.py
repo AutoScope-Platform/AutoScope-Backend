@@ -38,7 +38,7 @@ from app.modules.payments import service as payments
 from app.modules.payments.models import FINAL_STATUSES, Transaction, TransactionKind, TxStatus
 
 # Live tracking connections, keyed by job id (see app/core/realtime.py).
-hub = Hub()
+hub = Hub("tracking")
 
 # --- Pricing and dispatch settings (kobo / km / minutes). Change here to retune. -------------
 BASE_FARE_MINOR = 3_000_00  # N3,000 call-out
