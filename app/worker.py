@@ -46,6 +46,15 @@ def _run(job: Callable[[Any], Any]) -> Any:
             raise
 
 
+@celery_app.task(name="notifications.send")
+def send_notification(payload: dict) -> None:
+    """Push/SMS/e-mail for one notice, queued by `notifications.service.dispatch` so the
+    request that caused it does not wait for SMS or e-mail providers (FSD 7.2)."""
+    from app.modules.notifications import service  # noqa: PLC0415
+
+    service.send_now(payload)
+
+
 @celery_app.task(name="haulage.redispatch")
 def redispatch_haulage() -> int:
     from app.modules.haulage import service  # noqa: PLC0415

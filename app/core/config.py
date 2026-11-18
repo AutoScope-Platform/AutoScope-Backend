@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://autoscope:autoscope@127.0.0.1:5432/autoscope_dev"
     # Redis is optional in local/test (rate limits and chat fan-out fall back to memory).
     redis_url: str | None = None
+    # "celery": push/SMS/e-mail are sent by the background worker (needs REDIS_URL and a
+    # running worker). "inline": sent during the request (local development and tests).
+    task_queue: Literal["inline", "celery"] = "inline"
 
     # --- Auth --------------------------------------------------------------------
     jwt_secret: str = Field(default="dev-only-change-me-dev-only-change-me")
@@ -123,6 +126,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _reject_mocks_in_production(self) -> Settings:
         """Refuse to boot in production with fake integrations or default secrets."""
+        if self.task_queue == "celery" and not self.redis_url:
+            raise ValueError("TASK_QUEUE=celery needs REDIS_URL (the worker's queue)")
         if not self.is_production:
             return self
         mocks = [
