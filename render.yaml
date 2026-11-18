@@ -13,6 +13,8 @@ services:
       - { key: JWT_SECRET, generateValue: true }
       - { key: CORS_ORIGINS, value: "https://autoscope-admin.netlify.app" }
       - { key: REDIS_URL, fromService: { type: redis, name: autoscope-redis, property: connectionString } }
+      # Push/SMS/e-mail go through the worker below; live events fan out through Redis.
+      - { key: TASK_QUEUE, value: celery }
       - { key: SMS_DRIVER, value: mock }
       - { key: EMAIL_DRIVER, value: mock }
       - { key: PUSH_DRIVER, value: mock }
