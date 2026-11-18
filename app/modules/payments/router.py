@@ -10,16 +10,18 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.errors import Forbidden, error_responses
 from app.core.idempotency import run_idempotent
-from app.core.permissions import ADMIN_ROLES
+from app.core.permissions import ADMIN_ROLES, Capability
 from app.core.ratelimit import client_ip
 from app.modules.identity.deps import (
     CurrentUser,
     require_admin,
+    require_capability,
     require_super_admin,
     user_rate_limit,
 )
@@ -36,6 +38,8 @@ from app.modules.payments.schemas import (
     AdminTransactionPage,
     BankAccountIn,
     BankAccountOut,
+    CancellationPolicyIn,
+    CancellationPolicyOut,
     CommissionIn,
     CommissionOut,
     DisputeDetailOut,
@@ -52,6 +56,7 @@ from app.modules.payments.schemas import (
     PayoutPage,
     PayoutSettingsIn,
     PayoutSettingsOut,
+    ReceiptOut,
     ResolveIn,
     TransactionOut,
     TransactionPage,
@@ -155,6 +160,82 @@ def get_transaction(reference: str, user: CurrentUser, db: Session = Depends(get
     if not service.can_view(tx, user):
         raise Forbidden("This is not your transaction", code="forbidden")
     return tx
+
+
+def _visible_tx(db: Session, reference: str, user: User):
+    tx = service.get_transaction_by_ref(db, reference)
+    if not service.can_view(tx, user):
+        raise Forbidden("This is not your transaction", code="forbidden")
+    return tx
+
+
+@router.get(
+    "/transactions/{reference}/receipt",
+    response_model=ReceiptOut,
+    summary="Receipt for a paid order, booking, job or policy (FR-9.3)",
+    description="For the customer, the provider and staff. `print_url` is a printable version.",
+    responses=error_responses(403, 404, 422),
+)
+def receipt(reference: str, user: CurrentUser, db: Session = Depends(get_db)) -> ReceiptOut:
+    tx = _visible_tx(db, reference, user)
+    return ReceiptOut(
+        **service.build_receipt(db, tx), print_url=f"/api/v1/transactions/{tx.ref}/receipt/print"
+    )
+
+
+@router.get(
+    "/transactions/{reference}/receipt/print",
+    response_class=HTMLResponse,
+    summary="Printable receipt (open it and Print / Save as PDF)",
+    responses=error_responses(403, 404, 422),
+)
+def receipt_print(reference: str, user: CurrentUser, db: Session = Depends(get_db)):
+    return HTMLResponse(
+        service.receipt_html(service.build_receipt(db, _visible_tx(db, reference, user)))
+    )
+
+
+# --- Cancellation policy -----------------------------------------------------------------
+BusinessUser = Depends(require_capability(Capability.VIEW_OWN_ANALYTICS))  # any business role
+
+
+def _policy_out(db: Session, user: User) -> CancellationPolicyOut:
+    policy = service.get_cancellation_policy(db, user.id)
+    cap = service.get_payout_settings(db).max_cancel_fee_bps
+    if policy is None:
+        return CancellationPolicyOut(max_late_cancel_fee_bps=cap)
+    return CancellationPolicyOut(
+        free_cancel_hours=policy.free_cancel_hours,
+        late_cancel_fee_bps=policy.late_cancel_fee_bps,
+        order_cancel_window_hours=policy.order_cancel_window_hours,
+        max_late_cancel_fee_bps=cap,
+    )
+
+
+@router.get(
+    "/me/cancellation-policy",
+    response_model=CancellationPolicyOut,
+    summary="Provider: my cancellation terms",
+)
+def my_cancellation_policy(user: User = BusinessUser, db: Session = Depends(get_db)):
+    return _policy_out(db, user)
+
+
+@router.put(
+    "/me/cancellation-policy",
+    response_model=CancellationPolicyOut,
+    summary="Provider: set my cancellation terms (FR-9.4, FR-10.3)",
+    description="Applies to sales paid from now on. Bookings: free until `free_cancel_hours` "
+    "before the appointment, then `late_cancel_fee_bps` of the price is kept (capped by the "
+    "platform). Parts orders: buyers may cancel within `order_cancel_window_hours` of paying. "
+    "Your own cancellations are always refunded in full.",
+    responses=error_responses(403, 422),
+)
+def set_cancellation_policy(
+    body: CancellationPolicyIn, user: User = BusinessUser, db: Session = Depends(get_db)
+):
+    service.set_cancellation_policy(db, user, **body.model_dump())
+    return _policy_out(db, user)
 
 
 # --- Wallet and bank account -------------------------------------------------------------

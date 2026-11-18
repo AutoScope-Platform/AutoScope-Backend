@@ -91,6 +91,15 @@ class LineOut(BaseModel):
     amount_minor: int
 
 
+class CancellationTermsOut(BaseModel):
+    """What the customer pays if they cancel (FR-9.4). Paid bookings show the terms fixed
+    at payment; unpaid ones show the mechanic's current terms."""
+
+    free_until: datetime | None = Field(None, description="Free cancellation until then.")
+    late_fee_bps: int = Field(0, description="Share kept after that (2000 = 20%).")
+    fee_if_cancelled_now_minor: int = 0
+
+
 class BookingOut(BaseModel):
     id: uuid.UUID
     transaction_id: uuid.UUID
@@ -113,6 +122,9 @@ class BookingOut(BaseModel):
         None, description="A new time the mechanic suggested, waiting for the customer."
     )
     proposal_note: str | None = None
+    cancellation: CancellationTermsOut | None = Field(
+        None, description="Null once the work has started or the booking is over."
+    )
     lines: list[LineOut]
     created_at: datetime
 

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.errors import error_responses
+from app.core.legal import insurance_disclosure
 from app.core.permissions import ADMIN_ROLES
 from app.core.ratelimit import client_ip
 from app.modules.catalog import service
@@ -76,6 +77,7 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
                     verified=seller.kyc_status == KycStatus.APPROVED,
                     rating=avg, review_count=count,
                 ),
+                disclosure=insurance_disclosure(seller.display_name) if r.type == ListingType.INSURANCE_PRODUCT else None,
                 rejection_reason=r.rejection_reason if private else None,
                 fraud_signals=list(r.fraud_signals or []) if private else [],
             )

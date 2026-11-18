@@ -167,6 +167,9 @@ class ListingOut(BaseModel):
     images: list[ImageOut]
     seller: SellerOut
     created_at: datetime
+    disclosure: str | None = Field(
+        None, description="Insurance products only: who underwrites the cover (FSD 5.7)."
+    )
     rejection_reason: str | None = Field(None, description="Shown to the seller and staff only.")
     fraud_signals: list[str] = Field(default_factory=list, description="Seller and staff only.")
 

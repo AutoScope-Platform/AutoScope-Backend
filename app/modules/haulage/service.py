@@ -481,3 +481,14 @@ def sos_board(db: Session) -> list[dict]:
         }
         for j, tx in rows
     ]  # fmt: skip
+
+
+@payments.receipt_lines(TransactionKind.HAULAGE_JOB)
+def _receipt_lines(db: Session, tx: Transaction) -> list[tuple[str, int]]:
+    """Receipt line (FR-9.3): the route and distance."""
+    job = db.scalar(select(HaulageJob).where(HaulageJob.transaction_id == tx.id))
+    if job is None:
+        return []
+    kind = "SOS tow" if job.is_sos else "Tow"
+    route = f"{job.pickup_address} to {job.drop_address} ({job.distance_km:.1f} km)"
+    return [(f"{kind}: {route}", tx.amount_minor)]

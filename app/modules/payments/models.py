@@ -139,6 +139,11 @@ class Transaction(UUIDPrimaryKey, Timestamps, Base):
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The row in the owning module (order, booking, job, policy) this transaction belongs to.
     source_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    # The provider's cancellation terms, copied when the payment succeeds (FR-9.4, FR-10.3)
+    # so a later change to their policy never changes a sale that is already paid.
+    cancel_free_hours: Mapped[int | None] = mapped_column(Integer)
+    cancel_fee_bps: Mapped[int | None] = mapped_column(Integer)
+    cancel_window_hours: Mapped[int | None] = mapped_column(Integer)
 
     @property
     def ref(self) -> str:
@@ -309,6 +314,29 @@ class PayoutSettings(Base):
     payout_weekday: Mapped[int] = mapped_column(Integer, default=4)  # 0 = Monday ... 4 = Friday
     hold_days: Mapped[int] = mapped_column(Integer, default=3)
     min_payout_minor: Mapped[int] = mapped_column(BigInteger, default=500_000)  # N5,000
+    # Platform cap on the late-cancellation fee any provider may charge (FR-9.4).
+    max_cancel_fee_bps: Mapped[int] = mapped_column(Integer, default=5000, server_default="5000")
+
+
+class CancellationPolicy(UUIDPrimaryKey, Timestamps, Base):
+    """A provider's cancellation terms (FR-9.4, FR-10.3). No row means the platform default:
+    customers cancel free until the work starts or the order ships.
+
+    * Bookings: cancelling less than `free_cancel_hours` before the appointment keeps
+      `late_cancel_fee_bps` of the price for the provider (capped by the platform).
+    * Parts orders: the buyer may cancel only within `order_cancel_window_hours` of paying
+      (and before shipping). None = until shipping.
+    Cancellations by the provider are always refunded in full.
+    """
+
+    __tablename__ = "cancellation_policies"
+
+    provider_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    free_cancel_hours: Mapped[int] = mapped_column(Integer, default=0)
+    late_cancel_fee_bps: Mapped[int] = mapped_column(Integer, default=0)
+    order_cancel_window_hours: Mapped[int | None] = mapped_column(Integer)
 
 
 # --- Disputes ---------------------------------------------------------------------------
