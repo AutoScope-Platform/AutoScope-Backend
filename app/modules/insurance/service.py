@@ -66,6 +66,35 @@ def apply(
     ):
         raise NotFound("This insurance product is not available", code="listing_unavailable")
     vehicle = catalog.get_vehicle(db, customer, vehicle_id)  # must be in the customer's garage
+    application = _new_application(
+        db, customer, product, vehicle, details, renewal_of_id=renewal_of_id
+    )
+    db.commit()
+    _announce(db, application)
+    return application
+
+
+def _announce(db: Session, application: Application) -> None:
+    """Tell the insurer (after the commit)."""
+    publish(
+        "insurance.applied",
+        application_id=str(application.id),
+        insurer_id=str(application.insurer_id),
+        ref=payments.get_transaction(db, application.transaction_id).ref,
+    )
+
+
+def _new_application(
+    db: Session,
+    customer: User,
+    product: Listing,
+    vehicle,
+    details: str,
+    *,
+    renewal_of_id: uuid.UUID | None = None,
+    quote_request_id: uuid.UUID | None = None,
+) -> Application:
+    """Create the application and its transaction (flushed, not committed)."""
     tx = payments.create_transaction(
         db,
         kind=TransactionKind.POLICY_PURCHASE,
@@ -88,16 +117,86 @@ def apply(
         details=details.strip(),
         term_months=int(product.attributes.get("term_months", 12)),
         renewal_of_id=renewal_of_id,
+        quote_request_id=quote_request_id,
     )
     db.add(application)
-    db.commit()
-    publish(
-        "insurance.applied",
-        application_id=str(application.id),
-        insurer_id=str(product.seller_id),
-        ref=tx.ref,
-    )
+    db.flush()
     return application
+
+
+MAX_QUOTES = 10
+
+
+def request_quotes(
+    db: Session,
+    customer: User,
+    *,
+    vehicle_id: uuid.UUID,
+    details: str,
+    cover_type: str | None = None,
+    product_ids: list[uuid.UUID] | None = None,
+) -> tuple[uuid.UUID, list[Application]]:
+    """Send one vehicle and its details to several insurers at once (FR-7.2).
+
+    Picks the given products, or every live product with `cover_type` (up to 10). Each
+    becomes a normal application, linked by a shared `quote_request_id`, so insurers answer
+    as usual and the customer compares the offers side by side.
+    """
+    if not cover_type and not product_ids:
+        raise BadRequest("Choose a cover type or the products to ask", code="cover_required")
+    vehicle = catalog.get_vehicle(db, customer, vehicle_id)
+    stmt = select(Listing).where(
+        Listing.type == ListingType.INSURANCE_PRODUCT,
+        Listing.status == ListingStatus.LIVE,
+        Listing.seller_id != customer.id,
+    )
+    if product_ids:
+        stmt = stmt.where(Listing.id.in_(product_ids))
+    if cover_type:
+        stmt = stmt.where(Listing.attributes["cover_type"].astext.ilike(cover_type.strip()))
+    products = list(db.scalars(stmt.order_by(Listing.created_at, Listing.id).limit(MAX_QUOTES)))
+    if not products:
+        raise NotFound("No insurer offers that cover yet", code="no_products")
+    group = uuid.uuid4()
+    applications = [
+        _new_application(db, customer, p, vehicle, details, quote_request_id=group)
+        for p in products
+    ]
+    db.commit()
+    for application in applications:
+        _announce(db, application)
+    return group, applications
+
+
+# Order in the comparison: offers to look at first (cheapest first), then the rest.
+_RANK = {
+    TxStatus.OFFER_ACCEPTED: 0,
+    TxStatus.ACTIVE: 0,
+    TxStatus.QUOTE_SENT: 1,
+    TxStatus.AWAITING_INSURER: 2,
+}
+
+
+def quote_comparison(
+    db: Session, customer: User, quote_request_id: uuid.UUID
+) -> list[tuple[Application, Transaction]]:
+    """The applications of one quote request, best first: an accepted offer, then offers
+    by premium (cheapest first), then those still waiting, then declined or withdrawn."""
+    rows = [
+        (a, payments.get_transaction(db, a.transaction_id))
+        for a in db.scalars(
+            select(Application).where(
+                Application.quote_request_id == quote_request_id,
+                Application.customer_id == customer.id,
+            )
+        )
+    ]
+    if not rows:
+        raise NotFound("Quote request not found", code="quote_request_not_found")
+    return sorted(
+        rows,
+        key=lambda r: (_RANK.get(r[1].status, 3), r[0].premium_minor or 0, r[0].created_at),
+    )
 
 
 def get_application(
@@ -205,12 +304,21 @@ def answer_offer(
         raise UnprocessableEntity(
             "This offer has expired. Ask the insurer to renew it.", code="offer_expired"
         )
+    withdrawn: list[tuple[Application, Transaction]] = []
     if accept:
         tx.status = TxStatus.OFFER_ACCEPTED
         payments.request_payment(db, tx)
+        withdrawn = _withdraw_other_quotes(db, app)
     else:
         tx.status = TxStatus.DECLINED
     db.commit()
+    for other, other_tx in withdrawn:
+        publish(
+            "insurance.withdrawn",
+            application_id=str(other.id),
+            insurer_id=str(other.insurer_id),
+            ref=other_tx.ref,
+        )
     publish(
         "insurance.answered",
         application_id=str(app.id),
@@ -219,6 +327,25 @@ def answer_offer(
         ref=tx.ref,
     )
     return app
+
+
+def _withdraw_other_quotes(
+    db: Session, chosen: Application
+) -> list[tuple[Application, Transaction]]:
+    """The customer took one insurer's offer: close the rest of that quote request."""
+    if chosen.quote_request_id is None:
+        return []
+    withdrawn = []
+    for other in db.scalars(
+        select(Application).where(
+            Application.quote_request_id == chosen.quote_request_id, Application.id != chosen.id
+        )
+    ):
+        other_tx = payments.get_transaction(db, other.transaction_id, lock=True)
+        if other_tx.status in (TxStatus.AWAITING_INSURER, TxStatus.QUOTE_SENT):
+            payments.cancel_and_refund(db, other_tx, reason="Customer chose another insurer")
+            withdrawn.append((other, other_tx))
+    return withdrawn
 
 
 def cancel_application(db: Session, customer: User, application_id: uuid.UUID) -> Application:

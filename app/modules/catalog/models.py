@@ -125,6 +125,11 @@ class Listing(UUIDPrimaryKey, Timestamps, Base):
     stock: Mapped[int | None] = mapped_column(Integer)
     # Parts: the seller's own stock-keeping code, unique among their active listings.
     sku: Mapped[str | None] = mapped_column(String(64), index=True)
+    # One short video per listing (FR-3.1); the key in object storage and its type.
+    video_key: Mapped[str | None] = mapped_column(String(300))
+    video_type: Mapped[str | None] = mapped_column(String(40))
+    # Times the listing page was opened by someone other than the seller (FR-3.5).
+    view_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     vin: Mapped[str | None] = mapped_column(String(17), index=True)
     # Warnings shown to the reviewing admin: duplicate_vin, contact_details, duplicate_photos.
     fraud_signals: Mapped[list[str]] = mapped_column(JSONB, default=list)
@@ -188,6 +193,16 @@ class InquiryStatus(StrEnum):
     DECLINED = "declined"
 
 
+class InquiryKind(StrEnum):
+    QUESTION = "question"
+    OFFER = "offer"
+    INSPECTION = "inspection"  # FR-3.4: see the car, or have a mechanic look at it
+    TEST_DRIVE = "test_drive"
+
+
+VIEWING_KINDS = (InquiryKind.INSPECTION, InquiryKind.TEST_DRIVE)
+
+
 class ListingInquiry(UUIDPrimaryKey, Timestamps, Base):
     """A buyer's question or price offer on a listing (FR-3.5)."""
 
@@ -199,6 +214,11 @@ class ListingInquiry(UUIDPrimaryKey, Timestamps, Base):
     buyer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     message: Mapped[str] = mapped_column(String(1000))
     offer_minor: Mapped[int | None] = mapped_column(BigInteger)
+    kind: Mapped[InquiryKind] = mapped_column(
+        enum_type(InquiryKind), default=InquiryKind.QUESTION, server_default="question"
+    )
+    # Inspections and test drives: the time asked for (or the seller's new time once accepted).
+    viewing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[InquiryStatus] = mapped_column(
         enum_type(InquiryStatus), default=InquiryStatus.OPEN
     )
