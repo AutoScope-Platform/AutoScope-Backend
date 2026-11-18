@@ -80,32 +80,50 @@ def listing_suspended(db, p):
     ]
 
 
+INQUIRY_TITLES = {
+    "question": ("New enquiry", "Someone asked about {title}."),
+    "offer": ("New offer", "Someone made an offer on {title}."),
+    "inspection": ("Inspection request", "Someone wants to inspect {title}."),
+    "test_drive": ("Test drive request", "Someone wants to test-drive {title}."),
+}
+
+
+def _when(iso: str | None) -> str:
+    """A viewing time in Lagos time, e.g. 'Sat 6 Dec, 10:00'."""
+    if not iso:
+        return ""
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    local = datetime.fromisoformat(iso).astimezone(timezone(timedelta(hours=1)))
+    return f"{local:%a} {local.day} {local:%b, %H:%M}"  # no %-d: it fails on Windows
+
+
 def inquiry_created(db, p):
     listing = db.get(Listing, _uid(p["listing_id"]))
-    return (
-        [
-            Notice(
-                listing.seller_id,
-                "New enquiry",
-                f"Someone asked about {listing.title}.",
-                {"listing_id": p["listing_id"]},
-            )
-        ]
-        if listing
-        else []
-    )
+    if listing is None:
+        return []
+    title, body = INQUIRY_TITLES.get(p.get("kind") or "question", INQUIRY_TITLES["question"])
+    channels = ("push", "sms") if p.get("kind") in ("inspection", "test_drive") else ("push",)
+    return [
+        Notice(
+            listing.seller_id, title, body.format(title=listing.title),
+            {"listing_id": p["listing_id"], "inquiry_id": p["inquiry_id"]}, channels,
+        )
+    ]  # fmt: skip
 
 
 def inquiry_answered(db, p):
     verb = "accepted" if p["accepted"] else "declined"
-    return [
-        Notice(
-            _uid(p["buyer_id"]),
-            f"Offer {verb}",
-            f"The seller {verb} your offer or question.",
-            {"inquiry_id": p["inquiry_id"]},
-        )
-    ]
+    kind = p.get("kind") or "question"
+    if kind in ("inspection", "test_drive") and p["accepted"]:
+        what = "Inspection" if kind == "inspection" else "Test drive"
+        title, body = f"{what} confirmed", f"See you on {_when(p.get('viewing_at'))} (Lagos time)."
+        channels = ("push", "sms")
+    else:
+        noun = {"offer": "offer", "inspection": "inspection request",
+                "test_drive": "test drive request"}.get(kind, "question")  # fmt: skip
+        title, body, channels = f"Seller {verb}", f"The seller {verb} your {noun}.", ("push",)
+    return [Notice(_uid(p["buyer_id"]), title, body, {"inquiry_id": p["inquiry_id"]}, channels)]
 
 
 # --- Orders ----------------------------------------------------------------------------
@@ -450,6 +468,12 @@ RULES: dict[str, Rule] = {
     ),
     "insurance.answered": _simple(
         "Offer answered", "{ref}: the customer answered your offer.", "insurer_id", "application_id"
+    ),
+    "insurance.withdrawn": _simple(
+        "Quote request closed",
+        "{ref}: the customer chose another insurer.",
+        "insurer_id",
+        "application_id",
     ),
     "policy.issued": _simple(
         "Policy issued",

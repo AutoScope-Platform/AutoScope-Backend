@@ -24,9 +24,12 @@ from app.modules.catalog.schemas import (
     ListingIn,
     ListingOut,
     ListingPage,
+    ListingStatsOut,
     ListingUpdateIn,
     MechanicOut,
     MechanicPage,
+    RecommendationOut,
+    RecommendationsOut,
     ReviewQueueOut,
     SellerOut,
     ServiceRecordIn,
@@ -58,6 +61,8 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
     )
     ratings = reviews.ratings_for(db, seller_ids)
     staff = bool(viewer and viewer.has_role(*ADMIN_ROLES))
+    mine = [r for r in rows if staff or (viewer is not None and viewer.id == r.seller_id)]
+    stats = service.listing_stats(db, mine)
     out = []
     for r in rows:
         seller = sellers[r.seller_id]
@@ -78,6 +83,8 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
                     rating=avg, review_count=count,
                 ),
                 disclosure=insurance_disclosure(seller.display_name) if r.type == ListingType.INSURANCE_PRODUCT else None,
+                video_url=service.video_url(r),
+                stats=ListingStatsOut(**stats[r.id]) if r.id in stats else None,
                 rejection_reason=r.rejection_reason if private else None,
                 fraud_signals=list(r.fraud_signals or []) if private else [],
             )
@@ -200,7 +207,12 @@ def search(
     lat: float | None = Query(None, ge=-90, le=90),
     lng: float | None = Query(None, ge=-180, le=180),
     radius_km: float = Query(25, gt=0, le=2000),
-    sort: str = Query("newest", pattern="^(newest|price_asc|price_desc|distance)$"),
+    sort: str = Query(
+        "newest",
+        pattern="^(newest|price_asc|price_desc|distance|rating|relevance)$",
+        description="`rating`: best-rated sellers first. `relevance`: best match for `q` "
+        "first (needs `q`). `distance`: needs `lat` and `lng`.",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -297,7 +309,8 @@ def my_listings(
     responses=error_responses(404),
 )
 def get_listing(listing_id: uuid.UUID, viewer: OptionalUser, db: Session = Depends(get_db)):
-    return _one(db, service.get_listing(db, listing_id, viewer), viewer)
+    """Opening a listing counts a view for the seller's stats (not the seller's own views)."""
+    return _one(db, service.view_listing(db, listing_id, viewer), viewer)
 
 
 @router.patch(
@@ -378,7 +391,10 @@ def delete_image(
 def create_inquiry(
     listing_id: uuid.UUID, body: InquiryIn, user: CurrentUser, db: Session = Depends(get_db)
 ):
-    return service.create_inquiry(db, user, listing_id, body.message, body.offer_minor)
+    return service.create_inquiry(
+        db, user, listing_id, body.message, body.offer_minor, kind=body.kind,
+        viewing_at=body.viewing_at,
+    )  # fmt: skip
 
 
 @router.get(
@@ -400,7 +416,7 @@ def list_inquiries(listing_id: uuid.UUID, user: CurrentUser, db: Session = Depen
 def answer_inquiry(
     inquiry_id: uuid.UUID, body: InquiryAnswerIn, user: CurrentUser, db: Session = Depends(get_db)
 ):
-    return service.respond_to_inquiry(db, user, inquiry_id, body.accept)
+    return service.respond_to_inquiry(db, user, inquiry_id, body.accept, body.viewing_at)
 
 
 # --- Admin: listing review ---------------------------------------------------------------
@@ -463,3 +479,59 @@ def admin_suspend(
         db, listing_id, reason=body.reason, admin=admin, ip=client_ip(request)
     )
     return _one(db, listing, admin)
+
+
+# --- Video, my enquiries, recommendations ------------------------------------------------
+@router.post(
+    "/listings/{listing_id}/video",
+    response_model=ListingOut,
+    summary="Upload the listing's video (MP4, MOV or WebM, up to 50 MB)",
+    description="One video per listing (FR-3.1); uploading again replaces it.",
+    responses=error_responses(400, 404, 429),
+    dependencies=[Depends(user_rate_limit("listing-video", 10, 60))],
+)
+async def upload_video(
+    listing_id: uuid.UUID,
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> ListingOut:
+    data = await file.read(service.VIDEO_MAX_BYTES + 1)
+    return _one(db, service.set_video(db, user, listing_id, data), user)
+
+
+@router.delete(
+    "/listings/{listing_id}/video",
+    response_model=ListingOut,
+    summary="Remove the listing's video",
+    responses=error_responses(404),
+)
+def delete_video(listing_id: uuid.UUID, user: CurrentUser, db: Session = Depends(get_db)):
+    return _one(db, service.delete_video(db, user, listing_id), user)
+
+
+@router.get(
+    "/me/inquiries",
+    response_model=list[InquiryOut],
+    summary="My questions, offers, inspections and test drives (as a buyer)",
+)
+def my_inquiries(user: CurrentUser, db: Session = Depends(get_db)):
+    return service.my_inquiries(db, user)
+
+
+@router.get(
+    "/me/recommendations",
+    response_model=RecommendationsOut,
+    summary="Suggestions for me (FR-8.4)",
+    description="Parts that fit my garage vehicles, more from sellers I bought from, "
+    "top-rated mechanic services in my city and insurance for my vehicles. Each item says why.",
+)
+def my_recommendations(user: CurrentUser, db: Session = Depends(get_db)) -> RecommendationsOut:
+    pairs = service.recommendations(db, user)
+    listings = _listings_out(db, [listing for _, listing in pairs], user)
+    return RecommendationsOut(
+        items=[
+            RecommendationOut(reason=reason, listing=out)
+            for (reason, _), out in zip(pairs, listings, strict=True)
+        ]
+    )

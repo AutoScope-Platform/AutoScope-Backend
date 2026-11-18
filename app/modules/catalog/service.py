@@ -14,10 +14,10 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from geoalchemy2 import WKTElement
-from sqlalchemy import Float, Integer, cast, func, null, or_, select
+from sqlalchemy import Float, Integer, cast, func, null, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core import audit
@@ -39,6 +39,8 @@ from app.integrations import registry
 from app.integrations.base import IntegrationError, VinInfo
 from app.modules.catalog.models import (
     PUBLIC_STATUSES,
+    VIEWING_KINDS,
+    InquiryKind,
     InquiryStatus,
     Listing,
     ListingImage,
@@ -50,6 +52,7 @@ from app.modules.catalog.models import (
     Vehicle,
 )
 from app.modules.identity.models import KycStatus, User, UserRole
+from app.modules.payments.models import Transaction, TransactionKind
 from app.modules.reviews import service as reviews
 
 # ======================================================================================
@@ -289,6 +292,45 @@ def get_listing(db: Session, listing_id: uuid.UUID, viewer: User | None) -> List
     return listing
 
 
+def view_listing(db: Session, listing_id: uuid.UUID, viewer: User | None) -> Listing:
+    """`get_listing` for the listing page: also counts the view (FR-3.5) unless the viewer
+    is the seller or staff. The counter is bumped in SQL, so concurrent views all count."""
+    listing = get_listing(db, listing_id, viewer)
+    if listing.status in PUBLIC_STATUSES and not (
+        (viewer is not None and viewer.id == listing.seller_id) or _can_view_all(viewer)
+    ):
+        db.execute(
+            update(Listing)
+            .where(Listing.id == listing.id)
+            .values(view_count=Listing.view_count + 1)
+        )
+        db.commit()
+        db.refresh(listing)
+    return listing
+
+
+def listing_stats(db: Session, listings: list[Listing]) -> dict[uuid.UUID, dict]:
+    """Views and enquiries per listing, for the seller's dashboard (FR-3.5)."""
+    if not listings:
+        return {}
+    rows = db.execute(
+        select(ListingInquiry.listing_id, ListingInquiry.kind, func.count())
+        .where(ListingInquiry.listing_id.in_([li.id for li in listings]))
+        .group_by(ListingInquiry.listing_id, ListingInquiry.kind)
+    ).all()
+    stats = {
+        li.id: {"views": li.view_count or 0, "enquiries": 0, "offers": 0, "viewing_requests": 0}
+        for li in listings
+    }
+    for listing_id, kind, n in rows:
+        stats[listing_id]["enquiries"] += n
+        if kind == InquiryKind.OFFER:
+            stats[listing_id]["offers"] += n
+        elif kind in VIEWING_KINDS:
+            stats[listing_id]["viewing_requests"] += n
+    return stats
+
+
 def _get_own(db: Session, user: User, listing_id: uuid.UUID) -> Listing:
     listing = db.get(Listing, listing_id)
     if listing is None or listing.status == ListingStatus.REMOVED or listing.seller_id != user.id:
@@ -419,6 +461,41 @@ def delete_image(db: Session, seller: User, listing_id: uuid.UUID, image_id: uui
     db.commit()
 
 
+VIDEO_TYPES = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}
+VIDEO_MAX_BYTES = 50 * 1024 * 1024
+
+
+def set_video(db: Session, seller: User, listing_id: uuid.UUID, data: bytes) -> Listing:
+    """Attach (or replace) the listing's one video (FR-3.1): MP4, MOV or WebM up to 50 MB."""
+    listing = _get_own(db, seller, listing_id)
+    content_type = checked_type(
+        data, VIDEO_TYPES, message="Videos must be MP4, MOV or WebM", code="invalid_file_type"
+    )
+    if len(data) > VIDEO_MAX_BYTES:
+        raise BadRequest("Videos must be under 50 MB", code="file_too_large")
+    storage = registry.get_storage()
+    key = f"listings/{listing.id}/video-{uuid.uuid4().hex}{VIDEO_TYPES[content_type]}"
+    storage.put(key, data, content_type)
+    if listing.video_key:
+        storage.delete(listing.video_key)
+    listing.video_key, listing.video_type = key, content_type
+    db.commit()
+    return listing
+
+
+def delete_video(db: Session, seller: User, listing_id: uuid.UUID) -> Listing:
+    listing = _get_own(db, seller, listing_id)
+    if listing.video_key:
+        registry.get_storage().delete(listing.video_key)
+    listing.video_key = listing.video_type = None
+    db.commit()
+    return listing
+
+
+def video_url(listing: Listing) -> str | None:
+    return registry.get_storage().url(listing.video_key) if listing.video_key else None
+
+
 def image_url(image: ListingImage) -> str:
     """A time-limited link the app can show (private storage, so never a permanent URL)."""
     return registry.get_storage().url(image.storage_key)
@@ -468,8 +545,12 @@ def search_listings(
     sort becomes available.
     """
     stmt = select(Listing).where(Listing.status.in_([ListingStatus.LIVE, ListingStatus.RESERVED]))
-    if q:
-        like = f"%{q.strip()}%"
+    # Every word must appear somewhere (title, description or SKU), in any order, so
+    # "brake pads camry" finds "Brake pads - Toyota Camry". Wildcards typed by the user are
+    # treated as plain characters.
+    for word in (q or "").split()[:8]:
+        escaped = word.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        like = f"%{escaped}%"
         stmt = stmt.where(
             or_(Listing.title.ilike(like), Listing.description.ilike(like), Listing.sku.ilike(like))
         )
@@ -508,7 +589,24 @@ def search_listings(
             func.ST_DWithin(Listing.location, point, radius_km * 1000)
         )
 
-    if sort == "price_asc":
+    if sort == "rating":
+        ratings = reviews.rating_summary_subquery()
+        stmt = stmt.outerjoin(ratings, ratings.c.user_id == Listing.seller_id).order_by(
+            func.coalesce(ratings.c.average, 0.0).desc(),
+            func.coalesce(ratings.c.count, 0).desc(),
+            Listing.created_at.desc(),
+            Listing.id,
+        )
+    elif sort == "relevance" and q:
+        # pg_trgm: how well the search words match the title (then the description).
+        words = q.strip()
+        stmt = stmt.order_by(
+            func.word_similarity(words, Listing.title).desc(),
+            func.word_similarity(words, Listing.description).desc(),
+            Listing.created_at.desc(),
+            Listing.id,
+        )
+    elif sort == "price_asc":
         stmt = stmt.order_by(Listing.price_minor.asc(), Listing.id)
     elif sort == "price_desc":
         stmt = stmt.order_by(Listing.price_minor.desc(), Listing.id)
@@ -670,20 +768,64 @@ def mechanic_directory(
 # 5. Inquiries
 # ======================================================================================
 def create_inquiry(
-    db: Session, buyer: User, listing_id: uuid.UUID, message: str, offer_minor: int | None
+    db: Session,
+    buyer: User,
+    listing_id: uuid.UUID,
+    message: str,
+    offer_minor: int | None,
+    *,
+    kind: InquiryKind | None = None,
+    viewing_at: datetime | None = None,
 ) -> ListingInquiry:
+    """A question, a price offer, or a request to inspect / test-drive a vehicle (FR-3.4)."""
     listing = get_listing(db, listing_id, buyer)
     if listing.seller_id == buyer.id:
         raise UnprocessableEntity("You cannot message your own listing", code="own_listing")
     if listing.status != ListingStatus.LIVE:
         raise UnprocessableEntity("This listing is not accepting enquiries", code="not_live")
+    kind = kind or (InquiryKind.OFFER if offer_minor is not None else InquiryKind.QUESTION)
+    if kind == InquiryKind.OFFER and offer_minor is None:
+        raise BadRequest("Give the amount you offer (offer_minor)", code="offer_required")
+    if kind in VIEWING_KINDS:
+        if listing.type != ListingType.VEHICLE:
+            raise UnprocessableEntity(
+                "Inspections and test drives are for vehicles", code="vehicles_only"
+            )
+        _check_viewing_time(viewing_at)
+    elif viewing_at is not None:
+        raise BadRequest(
+            "A time is only for inspections and test drives", code="viewing_time_not_allowed"
+        )
     inquiry = ListingInquiry(
-        listing_id=listing.id, buyer_id=buyer.id, message=message.strip(), offer_minor=offer_minor
-    )
+        listing_id=listing.id, buyer_id=buyer.id, message=message.strip(), offer_minor=offer_minor,
+        kind=kind, viewing_at=viewing_at,
+    )  # fmt: skip
     db.add(inquiry)
     db.commit()
-    publish("inquiry.created", inquiry_id=str(inquiry.id), listing_id=str(listing.id))
+    publish(
+        "inquiry.created", inquiry_id=str(inquiry.id), listing_id=str(listing.id), kind=kind.value
+    )
     return inquiry
+
+
+def _check_viewing_time(viewing_at: datetime | None) -> None:
+    if viewing_at is None or viewing_at.tzinfo is None or viewing_at <= utcnow():
+        raise BadRequest(
+            "Pick a future time with a timezone offset, e.g. 2026-12-01T10:00:00+01:00",
+            code="invalid_time",
+        )
+
+
+def my_inquiries(db: Session, buyer: User) -> list[ListingInquiry]:
+    """The buyer's own questions, offers and viewing requests, newest first."""
+    return list(
+        db.scalars(
+            select(ListingInquiry)
+            .where(ListingInquiry.buyer_id == buyer.id)
+            .order_by(ListingInquiry.created_at.desc())
+            .limit(200)
+        )
+    )
 
 
 def list_inquiries(db: Session, seller: User, listing_id: uuid.UUID) -> list[ListingInquiry]:
@@ -698,14 +840,27 @@ def list_inquiries(db: Session, seller: User, listing_id: uuid.UUID) -> list[Lis
 
 
 def respond_to_inquiry(
-    db: Session, seller: User, inquiry_id: uuid.UUID, accept: bool
+    db: Session,
+    seller: User,
+    inquiry_id: uuid.UUID,
+    accept: bool,
+    viewing_at: datetime | None = None,
 ) -> ListingInquiry:
+    """Accept or decline. Accepting a viewing may move it to `viewing_at` instead."""
     inquiry = db.get(ListingInquiry, inquiry_id)
     listing = db.get(Listing, inquiry.listing_id) if inquiry else None
     if inquiry is None or listing is None or listing.seller_id != seller.id:
         raise NotFound("Enquiry not found", code="inquiry_not_found")
     if inquiry.status != InquiryStatus.OPEN:
         raise UnprocessableEntity("This enquiry was already answered", code="already_answered")
+    if viewing_at is not None:
+        if inquiry.kind not in VIEWING_KINDS or not accept:
+            raise BadRequest(
+                "A new time can only be given when accepting a viewing",
+                code="viewing_time_not_allowed",
+            )
+        _check_viewing_time(viewing_at)
+        inquiry.viewing_at = viewing_at
     inquiry.status = InquiryStatus.ACCEPTED if accept else InquiryStatus.DECLINED
     db.commit()
     publish(
@@ -713,6 +868,8 @@ def respond_to_inquiry(
         inquiry_id=str(inquiry.id),
         buyer_id=str(inquiry.buyer_id),
         accepted=accept,
+        kind=inquiry.kind.value,
+        viewing_at=inquiry.viewing_at.isoformat() if inquiry.viewing_at else None,
     )
     return inquiry
 
@@ -809,3 +966,66 @@ def suspend_listing(
     db.commit()
     publish("listing.suspended", listing_id=str(listing.id), seller_id=str(listing.seller_id))
     return listing
+
+
+# ======================================================================================
+# 7. Recommendations (FR-8.4)
+# ======================================================================================
+def recommendations(db: Session, user: User, *, limit: int = 20) -> list[tuple[str, Listing]]:
+    """Simple, explainable suggestions, each with the reason shown to the person:
+
+    * parts that fit the vehicles in their garage,
+    * more parts from sellers they have bought from,
+    * top-rated mechanic services in their city,
+    * insurance products, when they have a vehicle.
+    """
+    out: list[tuple[str, Listing]] = []
+    seen: set[uuid.UUID] = set()
+
+    def add(reason: str, rows) -> None:
+        for row in rows:
+            if row.id not in seen and row.seller_id != user.id:
+                seen.add(row.id)
+                out.append((reason, row))
+
+    live = select(Listing).where(Listing.status == ListingStatus.LIVE)
+    newest = (Listing.created_at.desc(), Listing.id)
+    vehicles = list_vehicles(db, user)[:5]
+    for v in vehicles:
+        parts = live.where(Listing.type == ListingType.PART, _fits_clause(v.make, v.model, v.year))
+        add(f"Fits your {v.year} {v.make} {v.model}", db.scalars(parts.order_by(*newest).limit(4)))
+
+    bought_from = select(Transaction.provider_id).where(
+        Transaction.customer_id == user.id,
+        Transaction.kind == TransactionKind.PARTS_ORDER,
+        Transaction.paid_at.is_not(None),
+    )
+    add(
+        "From a seller you have bought from",
+        db.scalars(
+            live.where(Listing.type == ListingType.PART, Listing.seller_id.in_(bought_from))
+            .order_by(*newest)
+            .limit(4)
+        ),
+    )
+
+    if user.city:
+        ratings = reviews.rating_summary_subquery()
+        services = (
+            live.where(
+                Listing.type == ListingType.MECHANIC_SERVICE, Listing.city.ilike(user.city.strip())
+            )
+            .outerjoin(ratings, ratings.c.user_id == Listing.seller_id)
+            .order_by(func.coalesce(ratings.c.average, 0.0).desc(), *newest)
+            .limit(4)
+        )
+        add(f"Top-rated mechanic services in {user.city}", db.scalars(services))
+
+    if vehicles:
+        add(
+            "Insurance for your vehicles",
+            db.scalars(
+                live.where(Listing.type == ListingType.INSURANCE_PRODUCT).order_by(*newest).limit(3)
+            ),
+        )
+    return out[:limit]
