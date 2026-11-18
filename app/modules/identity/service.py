@@ -729,6 +729,21 @@ def erase_account(
         _check_otp(db, user, OtpPurpose.ACCOUNT_ERASURE, code)
     else:
         raise BadRequest("Your password is not correct", code="invalid_password")
+    audit.record(
+        db,
+        category=AuditCategory.AUTH,
+        action="Account erased on request",
+        actor_id=user.id,
+        actor_name="Erased user",
+        target=user.ref,
+        ip_address=ip,
+    )
+    _anonymise(db, user)
+    db.commit()
+
+
+def _anonymise(db: Session, user: User) -> None:
+    """Remove everything that identifies the person; keep the row for financial records."""
     storage = registry.get_storage()
     for submission in db.scalars(select(KycSubmission).where(KycSubmission.user_id == user.id)):
         for doc in submission.documents:
@@ -740,15 +755,6 @@ def erase_account(
     # Unlink Google/Apple so signing in with them again starts a fresh account.
     db.execute(delete(SocialAccount).where(SocialAccount.user_id == user.id))
     _revoke_all_tokens(db, user.id)
-    audit.record(
-        db,
-        category=AuditCategory.AUTH,
-        action="Account erased on request",
-        actor_id=user.id,
-        actor_name="Erased user",
-        target=user.ref,
-        ip_address=ip,
-    )
     user.full_name = "Erased user"
     user.business_name = None
     user.email = None
@@ -757,7 +763,6 @@ def erase_account(
     user.password_hash = hash_password(secrets.token_urlsafe(24))
     user.status = AccountStatus.SUSPENDED
     user.erased_at = utcnow()
-    db.commit()
 
 
 # ======================================================================================
@@ -1219,3 +1224,34 @@ def _create_social_user(
         ip_address=ip,
     )
     return user
+
+
+def remove_user(
+    db: Session, user_id: uuid.UUID, *, admin: User, reason: str, ip: str | None
+) -> None:
+    """An admin removes an account for breaking the rules (FR-13.2).
+
+    Same anonymisation as a person deleting their own account (transaction records stay),
+    plus their pending and live listings come down (catalog listens for `user.removed`).
+    """
+    user = get_user(db, user_id)
+    if user.id == admin.id:
+        raise Forbidden("You cannot remove your own account here", code="self_action")
+    if user.erased_at is not None:
+        raise Conflict("This account was already removed", code="already_removed")
+    if user.has_role(*ADMIN_ROLES):
+        raise Forbidden(
+            "Take away the staff role before removing a staff account", code="staff_account"
+        )
+    audit.record(
+        db,
+        category=AuditCategory.ADMIN,
+        action=f"Removed user ({reason.strip()[:100]})",
+        actor_id=admin.id,
+        actor_name=admin.full_name,
+        target=user.ref,
+        ip_address=ip,
+    )
+    _anonymise(db, user)
+    db.commit()
+    publish("user.removed", user_id=str(user.id))

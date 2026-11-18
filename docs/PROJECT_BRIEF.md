@@ -19,7 +19,8 @@ expected load. Revisit if profiling shows the database layer is the bottleneck.
 Staging and production must never share secrets or databases.
 
 **Launch gate (before real users):** live payment keys tested end to end; a KYC vendor
-integrated; SMS sender ID approved; Redis pub/sub for sockets if more than one API instance;
-backups enabled on the database; first Super admin created; load test on search.
+integrated; SMS sender ID approved; Redis set (`REDIS_URL`) and tried with two API instances
+for live sockets; backups enabled on the database; first Super admin created; search load test
+re-run on staging hardware (locally: p95 under 350 ms at 100,000 listings, see ARCHITECTURE.md).
 
 **Out of scope here:** client apps, marketing site, native push setup on the client side.

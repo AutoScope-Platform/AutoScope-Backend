@@ -61,6 +61,8 @@ class HaulageJob(UUIDPrimaryKey, Timestamps, Base):
         ForeignKey("vehicles.id", ondelete="SET NULL")
     )
     vehicle_description: Mapped[str] = mapped_column(String(200))
+    # What is being towed; the fare depends on it (FR-6.5).
+    vehicle_class: Mapped[str] = mapped_column(String(20), default="car", server_default="car")
     notes: Mapped[str | None] = mapped_column(String(500))
 
     pickup_address: Mapped[str] = mapped_column(String(300))

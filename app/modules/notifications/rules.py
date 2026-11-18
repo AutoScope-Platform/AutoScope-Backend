@@ -126,6 +126,29 @@ def inquiry_answered(db, p):
     return [Notice(_uid(p["buyer_id"]), title, body, {"inquiry_id": p["inquiry_id"]}, channels)]
 
 
+def low_stock(db, p):
+    return [
+        Notice(
+            _uid(p["seller_id"]), "Running low",
+            f"Only {p['stock']} left of {p['title']}. Restock to keep it live.",
+            {"listing_id": p["listing_id"]}, ("push", "email"),
+        )
+    ]  # fmt: skip
+
+
+def part_request_created(db, p):
+    """Tell sellers who stock that make (they can quote from the part-requests feed)."""
+    from app.modules.catalog import service as catalog  # noqa: PLC0415
+
+    what = f"{p['make']} {p['model']}".strip()
+    return [
+        Notice(seller_id, "New part request", f"{p['ref']}: a buyer needs a part for a {what}.",
+               {"request_id": p["request_id"]})
+        for seller_id in catalog.sellers_stocking_make(db, p["make"])
+        if str(seller_id) != p["buyer_id"]
+    ]  # fmt: skip
+
+
 # --- Orders ----------------------------------------------------------------------------
 def order_created(db, p):
     return [
@@ -406,6 +429,11 @@ RULES: dict[str, Rule] = {
     "escrow.refunded": escrow_refunded,
     "dispute.opened": dispute_opened,
     "dispute.resolved": dispute_resolved,
+    "listing.low_stock": low_stock,
+    "part_request.created": part_request_created,
+    "part_request.quoted": _simple(
+        "New quote for your part request", "{ref}: a seller sent a quote.", "buyer_id", "request_id"
+    ),
     "booking.requested": _booking(
         "New booking request", "{ref}: a customer wants to book you.", "mechanic_id"
     ),

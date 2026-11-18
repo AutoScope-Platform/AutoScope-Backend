@@ -62,6 +62,17 @@ PostgreSQL 16 with **PostGIS**. Listings and provider locations have a `geograph
 column plus plain `latitude`/`longitude`. Distance search uses `ST_DWithin` / `ST_Distance`.
 Extensions `postgis`, `pg_trgm`, `pgcrypto` are created by the baseline migration.
 
+Keyword search matches every word of `q` (in any order) in the title, description or SKU,
+backed by trigram (GIN) indexes on those columns; `sort=relevance` ranks by trigram word
+similarity. The TSD suggests OpenSearch; Postgres is enough at the FSD's 100,000-listing
+target, as measured below, so a separate search service can wait until data or load needs it.
+
+**Search load test** (`python -m scripts.loadtest_search`, 100,000 listings, 2,000 sellers,
+in-process through the real endpoints, laptop Postgres 16): every search p95 under 350 ms
+(FSD 5.1 target: 2 s). Keyword search: ~105 ms p50 for one word, ~47 ms for three words,
+against ~710 / ~750 ms without the trigram indexes. Re-run it against staging-sized hardware
+before launch and after big changes to search.
+
 ## Real time
 
 `core/realtime.py` fans messages out to open WebSockets. Two hubs: `user_events` (one channel
