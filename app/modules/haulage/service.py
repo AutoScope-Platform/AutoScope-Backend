@@ -46,6 +46,14 @@ PER_KM_MINOR = 250_00  # N250 per km
 MIN_FARE_MINOR = 5_000_00
 SOS_MULTIPLIER = 1.5
 ROAD_FACTOR = 1.3  # straight-line distance x 1.3 approximates road distance
+# Fare by what is towed (FR-6.5): heavier vehicles need a bigger truck.
+VEHICLE_CLASS_MULTIPLIER = {
+    "motorcycle": 0.6,
+    "car": 1.0,
+    "suv": 1.25,
+    "van": 1.4,  # vans, pick-ups and minibuses
+    "truck": 2.0,  # trucks and buses
+}
 AVERAGE_SPEED_KMH = 30  # city traffic, used for ETAs
 RADIUS_KM, SOS_RADIUS_KM = 10, 25  # first search radius; it grows with each round
 OFFERS_PER_ROUND, SOS_OFFERS_PER_ROUND = 5, 10
@@ -64,12 +72,18 @@ def _point(lat: float, lng: float):
 # Estimate
 # ======================================================================================
 def estimate_fare(
-    db: Session, pickup: tuple[float, float], drop: tuple[float, float], sos: bool
+    db: Session,
+    pickup: tuple[float, float],
+    drop: tuple[float, float],
+    sos: bool,
+    vehicle_class: str = "car",
 ) -> tuple[float, int]:
-    """Returns (road distance in km, fare in kobo)."""
+    """Returns (road distance in km, fare in kobo): distance, then the vehicle class
+    multiplier (FR-6.5), then the SOS surcharge."""
     metres = db.scalar(select(func.ST_Distance(_point(*pickup), _point(*drop)))) or 0.0
     km = round(metres / 1000 * ROAD_FACTOR, 1)
     fare = max(BASE_FARE_MINOR + int(km * PER_KM_MINOR), MIN_FARE_MINOR)
+    fare = int(fare * VEHICLE_CLASS_MULTIPLIER[vehicle_class])
     if sos:
         fare = int(fare * SOS_MULTIPLIER)
     return km, round(fare, -2)  # round to the nearest N1
@@ -118,6 +132,7 @@ def request_job(
     vehicle_description: str,
     notes: str | None,
     sos: bool,
+    vehicle_class: str = "car",
 ) -> HaulageJob:
     """Create a job and its transaction. The customer then pays the fare (`POST /payments`);
     dispatch starts when the payment succeeds."""
@@ -126,7 +141,7 @@ def request_job(
         vehicle_description = (
             vehicle_description or f"{vehicle.year} {vehicle.make} {vehicle.model}"
         )
-    km, fare = estimate_fare(db, pickup[:2], drop[:2], sos)
+    km, fare = estimate_fare(db, pickup[:2], drop[:2], sos, vehicle_class)
     tx = payments.create_transaction(
         db,
         kind=TransactionKind.HAULAGE_JOB,
@@ -142,6 +157,7 @@ def request_job(
         is_sos=sos,
         vehicle_id=vehicle_id,
         vehicle_description=vehicle_description,
+        vehicle_class=vehicle_class,
         notes=notes,
         pickup_lat=pickup[0],
         pickup_lng=pickup[1],

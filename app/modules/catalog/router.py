@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.errors import error_responses
 from app.core.legal import insurance_disclosure
-from app.core.permissions import ADMIN_ROLES
+from app.core.permissions import ADMIN_ROLES, Capability
 from app.core.ratelimit import client_ip
 from app.modules.catalog import service
 from app.modules.catalog.models import Listing, ListingStatus, ListingType
@@ -28,6 +28,11 @@ from app.modules.catalog.schemas import (
     ListingUpdateIn,
     MechanicOut,
     MechanicPage,
+    PartQuoteIn,
+    PartQuoteOut,
+    PartRequestIn,
+    PartRequestOut,
+    PartRequestPage,
     RecommendationOut,
     RecommendationsOut,
     ReviewQueueOut,
@@ -45,6 +50,7 @@ from app.modules.identity.deps import (
     CurrentUser,
     OptionalUser,
     require_admin,
+    require_capability,
     user_rate_limit,
 )
 from app.modules.identity.models import KycStatus, User
@@ -73,7 +79,7 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
                 id=r.id, ref=r.ref, type=r.type, status=r.status, title=r.title,
                 description=r.description, price_minor=r.price_minor, currency=r.currency,
                 city=r.city, latitude=r.latitude, longitude=r.longitude, stock=r.stock,
-                sku=r.sku,
+                sku=r.sku, low_stock_threshold=r.low_stock_threshold,
                 fits=[FitmentOut(make=f.make, model=f.model, year_from=f.year_from, year_to=f.year_to) for f in r.fitments],
                 vin=r.vin, attributes=r.attributes, created_at=r.created_at,
                 images=[ImageOut(id=i.id, url=service.image_url(i), position=i.position) for i in r.images],
@@ -535,3 +541,99 @@ def my_recommendations(user: CurrentUser, db: Session = Depends(get_db)) -> Reco
             for (reason, _), out in zip(pairs, listings, strict=True)
         ]
     )
+
+
+# --- Part requests (FR-4.6) --------------------------------------------------------------
+Buyer = Depends(require_capability(Capability.PURCHASE))
+PartsSeller = Depends(require_capability(Capability.LIST_PARTS))
+
+
+def _request_out(db: Session, request, viewer: User) -> PartRequestOut:
+    quotes = service.visible_quotes(request, viewer)
+    names = (
+        {
+            u.id: u.display_name
+            for u in db.query(User).filter(User.id.in_([q.provider_id for q in quotes]))
+        }
+        if quotes
+        else {}
+    )
+    return PartRequestOut(
+        id=request.id, ref=request.ref, buyer_id=request.buyer_id, vehicle_id=request.vehicle_id,
+        make=request.make, model=request.model, year=request.year, description=request.description,
+        city=request.city, status=request.status, created_at=request.created_at,
+        quotes=[PartQuoteOut.model_validate(q).model_copy(update={"provider_name": names.get(q.provider_id)}) for q in quotes],
+    )  # fmt: skip
+
+
+@router.post(
+    "/part-requests",
+    response_model=PartRequestOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ask sellers for a part that is not listed (FR-4.6)",
+    description="Sellers who stock that make are notified and reply with quotes. Use a garage "
+    "`vehicle_id`, or `make` with optional `model` and `year`.",
+    responses=error_responses(400, 404, 429),
+    dependencies=[Depends(user_rate_limit("part-request", 10, 3600))],
+)
+def create_part_request(body: PartRequestIn, user: User = Buyer, db: Session = Depends(get_db)):
+    return _request_out(db, service.create_part_request(db, user, **body.model_dump()), user)
+
+
+@router.get("/me/part-requests", response_model=list[PartRequestOut], summary="My part requests")
+def my_part_requests(user: CurrentUser, db: Session = Depends(get_db)):
+    return [_request_out(db, r, user) for r in service.my_part_requests(db, user)]
+
+
+@router.get(
+    "/part-requests",
+    response_model=PartRequestPage,
+    summary="Parts seller: open part requests to quote on",
+)
+def open_part_requests(
+    make: str | None = None,
+    city: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    user: User = PartsSeller,
+    db: Session = Depends(get_db),
+) -> PartRequestPage:
+    rows, total = service.open_part_requests(
+        db, user, make=make, city=city, page=page, page_size=page_size
+    )
+    return PartRequestPage(items=[_request_out(db, r, user) for r in rows], total=total)
+
+
+@router.get(
+    "/part-requests/{request_id}",
+    response_model=PartRequestOut,
+    summary="One part request (the buyer sees every quote, cheapest first)",
+    responses=error_responses(404),
+)
+def get_part_request(request_id: uuid.UUID, user: CurrentUser, db: Session = Depends(get_db)):
+    return _request_out(db, service.get_part_request(db, request_id, user), user)
+
+
+@router.put(
+    "/part-requests/{request_id}/quote",
+    response_model=PartQuoteOut,
+    summary="Parts seller: send or revise my quote",
+    responses=error_responses(404, 422),
+)
+def quote_part_request(
+    request_id: uuid.UUID,
+    body: PartQuoteIn,
+    user: User = PartsSeller,
+    db: Session = Depends(get_db),
+):
+    return service.quote_part_request(db, user, request_id, **body.model_dump())
+
+
+@router.post(
+    "/part-requests/{request_id}/close",
+    response_model=PartRequestOut,
+    summary="Close my part request (found it, or no longer needed)",
+    responses=error_responses(404),
+)
+def close_part_request(request_id: uuid.UUID, user: CurrentUser, db: Session = Depends(get_db)):
+    return _request_out(db, service.close_part_request(db, user, request_id), user)

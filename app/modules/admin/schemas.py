@@ -21,6 +21,7 @@ class Queues(BaseModel):
     listings_pending: int
     disputes_open: int
     reports_open: int
+    flagged_users: int = Field(0, description="Accounts on the repeat-offender list.")
 
 
 class SeriesPoint(BaseModel):
@@ -85,3 +86,30 @@ class AuditPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class RiskSignalsOut(BaseModel):
+    suspended_listings: int
+    upheld_reports: int
+    disputes_lost: int
+    rejected_listings: int
+    fraud_flagged_listings: int
+
+
+class RiskFlagOut(BaseModel):
+    user_id: uuid.UUID
+    ref: str
+    name: str
+    status: str
+    score: int = Field(description="Weighted strikes; 3 or more is flagged.")
+    signals: RiskSignalsOut
+    reasons: list[str] = Field(examples=[["2 listing(s) taken down", "1 report(s) upheld"]])
+
+
+class RiskFlagPage(BaseModel):
+    days: int
+    items: list[RiskFlagOut]
+
+
+class RemoveUserIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=300, description="Kept in the audit log.")
