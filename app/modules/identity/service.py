@@ -13,6 +13,7 @@ Section map (search for the banner comments):
     6. Profile & roles
     7. KYC                    - FR-1.4, FR-13.1
     8. Admin user management  - FR-13.2
+    9. Social sign-in         - FR-1.2 (Google / Apple)
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.core import audit
@@ -34,6 +35,7 @@ from app.core.errors import (
     Conflict,
     Forbidden,
     NotFound,
+    ServiceUnavailable,
     TooManyRequests,
     Unauthorized,
     UnprocessableEntity,
@@ -52,8 +54,9 @@ from app.core.security import (
     new_refresh_token,
     verify_password,
 )
+from app.core.uploads import checked_type
 from app.integrations import registry
-from app.integrations.base import IntegrationError
+from app.integrations.base import IntegrationError, SocialIdentity, SocialTokenError
 from app.modules.identity.models import (
     REQUIRED_KYC_DOCS,
     AccountStatus,
@@ -66,6 +69,7 @@ from app.modules.identity.models import (
     OtpCode,
     OtpPurpose,
     RefreshToken,
+    SocialAccount,
     User,
     UserRole,
 )
@@ -75,6 +79,7 @@ from app.modules.identity.schemas import (
     LoginOut,
     RegisterIn,
     RegisterOut,
+    SocialLoginIn,
     TokenOut,
     UserOut,
 )
@@ -101,8 +106,14 @@ def normalize_phone(raw: str) -> str:
         number = "+" + digits
     elif digits.startswith("0"):
         number = "+234" + digits[1:]
+    elif len(digits) == 10 and digits[0] in "789":
+        # A Nigerian mobile typed without its leading 0 (apps often show "+234" in a
+        # separate box). Treating it as "+803..." would silently store a wrong number.
+        number = "+234" + digits
     else:
-        number = "+" + digits
+        raise BadRequest(
+            "Enter the number with its country code, e.g. +2348012345678", code="invalid_phone"
+        )
     if not re.fullmatch(r"\+\d{10,15}", number):
         raise BadRequest("Enter a valid phone number", code="invalid_phone")
     return number
@@ -136,8 +147,14 @@ def _contact_for(user: User) -> tuple[str, str]:
 # ======================================================================================
 # 2. One-time codes (OTP)
 # ======================================================================================
-def _issue_otp(db: Session, user: User, purpose: OtpPurpose) -> str:
-    """Create a code, send it, and return where it went ("phone" or "email")."""
+def _issue_otp(db: Session, user: User, purpose: OtpPurpose, *, reuse_pending: bool = False) -> str:
+    """Create a code, send it, and return where it went ("phone" or "email").
+
+    The resend cooldown applies only while the previous code is still waiting to be used:
+    once a code has been used (e.g. the person signed in), a new one can be sent at once.
+    With `reuse_pending`, a code sent within the cooldown is reused instead of refusing,
+    so a double-tapped or retried sign-in does not fail (the person already has the code).
+    """
     settings = get_settings()
     now = utcnow()
     latest = db.scalar(
@@ -146,7 +163,10 @@ def _issue_otp(db: Session, user: User, purpose: OtpPurpose) -> str:
         .order_by(OtpCode.created_at.desc())
         .limit(1)
     )
-    if latest and (now - latest.created_at).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
+    pending = latest is not None and latest.consumed_at is None and latest.expires_at > now
+    if pending and (now - latest.created_at).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
+        if reuse_pending:
+            return _contact_for(user)[0]
         raise TooManyRequests(
             "Please wait a moment before requesting another code", code="otp_cooldown"
         )
@@ -399,8 +419,13 @@ def resend_otp(db: Session, identifier: str) -> None:
     """Resend a sign-up code. Silent for unknown or already verified accounts."""
     user = _find_user(db, identifier)
     if user and user.verified_at is None:
-        _issue_otp(db, user, OtpPurpose.VERIFY_CONTACT)
-        db.commit()
+        try:
+            _issue_otp(db, user, OtpPurpose.VERIFY_CONTACT)
+            db.commit()
+        except TooManyRequests:
+            # Answering 429 here (but 202 for unknown accounts) would reveal which
+            # unverified accounts exist. The person can simply try again shortly.
+            db.rollback()
 
 
 def _needs_second_factor(user: User) -> bool:
@@ -459,9 +484,23 @@ def login(
     if user.verified_at is None:
         raise Forbidden("Verify your phone or email to continue", code="contact_not_verified")
 
+    return _complete_sign_in(db, user, remember_me=remember_me, ip=ip, client=client)
+
+
+def _complete_sign_in(
+    db: Session,
+    user: User,
+    *,
+    remember_me: bool,
+    ip: str | None,
+    client: str | None,
+    method: str | None = None,
+) -> LoginOut:
+    """Last step of every sign-in (password or social): OTP challenge or tokens."""
+    settings = get_settings()
     user.failed_logins = 0
     if _needs_second_factor(user):
-        sent_to = _issue_otp(db, user, OtpPurpose.LOGIN)
+        sent_to = _issue_otp(db, user, OtpPurpose.LOGIN, reuse_pending=True)
         challenge = create_token(
             user.id,
             token_type="challenge",
@@ -471,11 +510,11 @@ def login(
         db.commit()
         return LoginOut(requires_otp=True, challenge_token=challenge, otp_sent_to=sent_to)
 
-    user.last_login_at = now
+    user.last_login_at = utcnow()
     audit.record(
         db,
         category=AuditCategory.AUTH,
-        action="Signed in",
+        action=f"Signed in ({method})" if method else "Signed in",
         actor_id=user.id,
         actor_name=user.full_name,
         target=client,
@@ -486,19 +525,32 @@ def login(
     return LoginOut(tokens=tokens)
 
 
-def verify_login(
-    db: Session, challenge_token: str, code: str, *, ip: str | None, client: str | None
-) -> TokenOut:
-    """Second step of sign-in: check the OTP and issue tokens."""
+def _user_from_challenge(db: Session, challenge_token: str) -> tuple[User, dict]:
     import jwt  # noqa: PLC0415
 
     try:
         claims = decode_token(challenge_token, expected_type="challenge")
-    except jwt.PyJWTError as exc:
+        user = db.get(User, uuid.UUID(claims["sub"]))
+    except (jwt.PyJWTError, ValueError, KeyError) as exc:
         raise Unauthorized("Please sign in again", code="invalid_challenge") from exc
-    user = db.get(User, uuid.UUID(claims["sub"]))
     if user is None or user.status != AccountStatus.ACTIVE:
         raise Unauthorized("Please sign in again", code="invalid_challenge")
+    return user, claims
+
+
+def resend_login_otp(db: Session, challenge_token: str) -> str:
+    """Send a fresh sign-in code for an open challenge (the first one never arrived)."""
+    user, _ = _user_from_challenge(db, challenge_token)
+    sent_to = _issue_otp(db, user, OtpPurpose.LOGIN)
+    db.commit()
+    return sent_to
+
+
+def verify_login(
+    db: Session, challenge_token: str, code: str, *, ip: str | None, client: str | None
+) -> TokenOut:
+    """Second step of sign-in: check the OTP and issue tokens."""
+    user, claims = _user_from_challenge(db, challenge_token)
     try:
         _check_otp(db, user, OtpPurpose.LOGIN, code)
     except BadRequest as exc:
@@ -549,6 +601,7 @@ def reset_password(
         raise BadRequest("That code is not correct", code="invalid_otp")
     _check_otp(db, user, OtpPurpose.PASSWORD_RESET, code)
     user.password_hash = hash_password(new_password)
+    user.has_password = True  # also how a Google/Apple account sets its first password
     user.verified_at = user.verified_at or utcnow()  # the code proved they own the contact
     user.failed_logins = 0
     user.locked_until = None
@@ -566,6 +619,11 @@ def reset_password(
 
 
 def change_password(db: Session, user: User, current: str, new: str, *, ip: str | None) -> None:
+    if not user.has_password:
+        raise BadRequest(
+            "Your account has no password yet. Use 'Forgot password' to set one.",
+            code="no_password_set",
+        )
     if not verify_password(current, user.password_hash):
         raise BadRequest("Your current password is not correct", code="invalid_password")
     user.password_hash = hash_password(new)
@@ -642,12 +700,35 @@ def set_two_factor(db: Session, user: User, enabled: bool, *, ip: str | None) ->
     return user
 
 
-def erase_account(db: Session, user: User, *, ip: str | None) -> None:
+def send_erasure_code(db: Session, user: User) -> str:
+    """Send a code that confirms "delete my account" (for accounts without a password)."""
+    sent_to = _issue_otp(db, user, OtpPurpose.ACCOUNT_ERASURE)
+    db.commit()
+    return sent_to
+
+
+def erase_account(
+    db: Session,
+    user: User,
+    *,
+    password: str | None = None,
+    code: str | None = None,
+    ip: str | None,
+) -> None:
     """Anonymise a person's data on request (NDPR/GDPR erasure, FSD 5.7).
+
+    Erasure cannot be undone, so a stolen access token alone is not enough: the caller
+    must also give the password or a code sent to their phone/e-mail.
 
     The row stays so order and payment history keep pointing at a valid user, as
     financial record-keeping rules require; everything identifying is removed.
     """
+    if password and user.has_password and verify_password(password, user.password_hash):
+        pass
+    elif code:
+        _check_otp(db, user, OtpPurpose.ACCOUNT_ERASURE, code)
+    else:
+        raise BadRequest("Your password is not correct", code="invalid_password")
     storage = registry.get_storage()
     for submission in db.scalars(select(KycSubmission).where(KycSubmission.user_id == user.id)):
         for doc in submission.documents:
@@ -656,6 +737,8 @@ def erase_account(db: Session, user: User, *, ip: str | None) -> None:
             except Exception:  # noqa: BLE001 - erasure continues even if one file is already gone
                 pass
         db.delete(submission)
+    # Unlink Google/Apple so signing in with them again starts a fresh account.
+    db.execute(delete(SocialAccount).where(SocialAccount.user_id == user.id))
     _revoke_all_tokens(db, user.id)
     audit.record(
         db,
@@ -737,8 +820,12 @@ def upload_kyc_document(
         raise Forbidden("Only business accounts submit KYC documents", code="kyc_not_required")
     if user.kyc_status == KycStatus.APPROVED:
         raise Conflict("Your account is already verified", code="kyc_already_approved")
-    if content_type not in KYC_CONTENT_TYPES:
-        raise BadRequest("Upload a JPG, PNG or PDF file", code="unsupported_file_type")
+    content_type = checked_type(
+        data,
+        KYC_CONTENT_TYPES,
+        message="Upload a JPG, PNG or PDF file",
+        code="unsupported_file_type",
+    )
     if not data or len(data) > KYC_MAX_BYTES:
         raise BadRequest("The file must be between 1 byte and 5 MB", code="invalid_file_size")
 
@@ -985,4 +1072,150 @@ def grant_staff_role(
         ip_address=ip,
     )
     db.commit()
+    return user
+
+
+# ======================================================================================
+# 9. Social sign-in (FR-1.2)
+# ======================================================================================
+def social_sign_in(
+    db: Session, data: SocialLoginIn, *, ip: str | None, client: str | None
+) -> LoginOut:
+    """Sign in, link or sign up with a Google/Apple ID token.
+
+    1. A known provider identity signs straight in.
+    2. Otherwise, a *verified* e-mail that matches an existing account links to it (the
+       provider has proved the person owns that address).
+    3. Otherwise a new account is created, which needs the sign-up details (role, terms).
+    The last step is the same as a password sign-in, including the OTP for 2FA and staff.
+    """
+    provider = data.provider.value
+    try:
+        identity = registry.get_social().verify(provider, data.id_token, data.nonce)
+    except SocialTokenError as exc:
+        raise Unauthorized(
+            "We could not verify that sign-in. Please try again.", code="invalid_social_token"
+        ) from exc
+    except IntegrationError as exc:
+        raise ServiceUnavailable(
+            f"{provider.title()} sign-in is not available right now.",
+            code="social_login_unavailable",
+        ) from exc
+
+    now = utcnow()
+    account = db.scalar(
+        select(SocialAccount).where(
+            SocialAccount.provider == data.provider, SocialAccount.subject == identity.subject
+        )
+    )
+    user = db.get(User, account.user_id) if account else None
+    created = False
+    if user is None and identity.email:
+        existing = db.scalar(
+            select(User).where(User.email == identity.email, User.erased_at.is_(None))
+        )
+        if existing is not None and not identity.email_verified:
+            raise Conflict(
+                "An account with this e-mail already exists. Sign in with your password.",
+                code="already_registered",
+            )
+        user = existing
+    if user is None:
+        user = _create_social_user(db, data, identity, ip=ip, client=client)
+        created = True
+
+    if account is None:
+        db.add(
+            SocialAccount(
+                user_id=user.id,
+                provider=data.provider,
+                subject=identity.subject,
+                email=identity.email,
+                last_used_at=now,
+            )
+        )
+        if not created:
+            audit.record(
+                db,
+                category=AuditCategory.AUTH,
+                action=f"Linked {provider} sign-in",
+                actor_id=user.id,
+                actor_name=user.full_name,
+                target=client,
+                ip_address=ip,
+            )
+    else:
+        account.last_used_at = now
+
+    if user.status == AccountStatus.SUSPENDED:
+        raise Forbidden(
+            "This account has been suspended. Contact support.", code="account_suspended"
+        )
+    if user.verified_at is None and identity.email_verified and user.email == identity.email:
+        user.verified_at = now  # the provider proved this e-mail belongs to them
+    if user.verified_at is None:
+        raise Forbidden("Verify your phone or email to continue", code="contact_not_verified")
+    return _complete_sign_in(
+        db, user, remember_me=data.remember_me, ip=ip, client=client, method=provider
+    )
+
+
+def _create_social_user(
+    db: Session,
+    data: SocialLoginIn,
+    identity: SocialIdentity,
+    *,
+    ip: str | None,
+    client: str | None,
+) -> User:
+    if not identity.email:
+        raise BadRequest(
+            "Share your e-mail address when signing in, or sign up with e-mail or phone.",
+            code="email_required",
+        )
+    if not identity.email_verified:
+        raise BadRequest(
+            "Verify your e-mail with the provider first, or sign up with e-mail or phone.",
+            code="email_not_verified",
+        )
+    is_business = any(r in BUSINESS_ROLES for r in data.roles)
+    missing = []
+    if not data.accept_terms:
+        missing.append("accept_terms")
+    if is_business and not (data.business_name or "").strip():
+        missing.append("business_name")
+    if missing:
+        # Not an error the user caused: the app shows the sign-up form, then sends the
+        # same token again with these fields. `details` lets it prefill the form.
+        raise UnprocessableEntity(
+            "Finish creating your account",
+            code="signup_details_required",
+            details={"missing": missing, "email": identity.email, "name": identity.name},
+        )
+
+    name = (data.full_name or identity.name or identity.email.split("@")[0]).strip()[:120]
+    user = User(
+        full_name=name,
+        business_name=data.business_name.strip() if data.business_name else None,
+        email=identity.email,
+        city=data.city,
+        # Nobody knows this password; `has_password` tells the apps to offer "set password".
+        password_hash=hash_password(secrets.token_urlsafe(32)),
+        has_password=False,
+        accepted_terms_at=utcnow(),
+        verified_at=utcnow(),
+        kyc_status=KycStatus.NOT_SUBMITTED if is_business else KycStatus.NOT_REQUIRED,
+    )
+    user.roles = [UserRole(role=r) for r in data.roles]
+    db.add(user)
+    db.flush()
+    audit.record(
+        db,
+        category=AuditCategory.AUTH,
+        action=f"Account created ({data.provider.value})",
+        actor_id=user.id,
+        actor_name=user.full_name,
+        target=client,
+        ip_address=ip,
+    )
     return user
