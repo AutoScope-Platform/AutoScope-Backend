@@ -7,6 +7,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
+from app.core.legal import INSURANCE_DISCLOSURE
 from app.modules.insurance.models import ClaimStatus, PolicyStatus
 from app.modules.payments.models import EscrowStatus, TxStatus
 
@@ -50,6 +51,7 @@ class ApplicationOut(BaseModel):
     decline_reason: str | None
     is_renewal: bool
     created_at: datetime
+    disclosure: str = Field(INSURANCE_DISCLOSURE, description="Show with every offer (FSD 5.7).")
 
 
 class ApplicationPage(BaseModel):
@@ -69,6 +71,7 @@ class PolicyOut(BaseModel):
     ends_on: date
     holder_id: uuid.UUID
     insurer_id: uuid.UUID
+    disclosure: str = Field(INSURANCE_DISCLOSURE, description="Show with the policy (FSD 5.7).")
 
 
 class ClaimIn(BaseModel):

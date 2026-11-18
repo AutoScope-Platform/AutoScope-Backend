@@ -22,6 +22,7 @@ from app.core import db as db_module
 from app.core.db import utcnow
 from app.core.errors import BadRequest, NotFound, UnprocessableEntity
 from app.core.events import Event, publish, subscribe
+from app.core.legal import insurance_disclosure
 from app.core.pagination import paginate_page
 from app.core.permissions import ADMIN_ROLES
 from app.core.uploads import checked_type
@@ -333,7 +334,7 @@ def certificate_html(db: Session, policy: Policy) -> str:
         "<style>body{font-family:sans-serif;max-width:640px;margin:40px auto}"
         "th{text-align:left;padding:6px 16px 6px 0;color:#555}</style>"
         f"<h1>Certificate of Insurance</h1><table>{body}</table>"
-        "<p><small>Issued through AutoScope on behalf of the insurer above.</small></p>"
+        f"<p><small>{escape(insurance_disclosure(insurer.display_name))}</small></p>"
     )
 
 
@@ -480,3 +481,13 @@ def decide_claim(
         ref=claim.ref,
     )
     return claim
+
+
+@payments.receipt_lines(TransactionKind.POLICY_PURCHASE)
+def _receipt_lines(db: Session, tx: Transaction) -> list[tuple[str, int]]:
+    """Receipt line (FR-9.3): the product and vehicle the premium is for."""
+    app = db.scalar(select(Application).where(Application.transaction_id == tx.id))
+    if app is None:
+        return []
+    cover = f" ({app.cover_type})" if app.cover_type else ""
+    return [(f"{app.product_title}{cover} - {app.vehicle_summary}", tx.amount_minor)]

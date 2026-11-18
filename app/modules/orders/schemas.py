@@ -94,6 +94,9 @@ class OrderOut(BaseModel):
     contact_phone: str | None
     tracking_note: str | None
     shipped_at: datetime | None
+    cancel_until: datetime | None = Field(
+        None, description="The buyer can cancel until then (seller's window). Null = until shipped."
+    )
     created_at: datetime
 
 

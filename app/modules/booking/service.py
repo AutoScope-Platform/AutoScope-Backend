@@ -460,13 +460,31 @@ def answer_proposed_time(
 
 
 def cancel_booking(db: Session, user: User, booking_id: uuid.UUID, reason: str | None) -> Booking:
-    """Either side can cancel before the work starts. A paid booking is refunded in full."""
+    """Either side can cancel before the work starts.
+
+    A paid booking is refunded in full, except when the *customer* cancels inside the
+    mechanic's late window (FR-9.4): then the mechanic's late fee is kept for them.
+    """
     booking, tx = _locked(db, booking_id)
     if user.id not in (booking.customer_id, booking.mechanic_id):
         raise NotFound("Booking not found", code="booking_not_found")
     _need(tx, TxStatus.REQUESTED, TxStatus.QUOTE_REQUESTED, TxStatus.QUOTE_SENT, TxStatus.CONFIRMED)
-    payments.cancel_and_refund(db, tx, reason=reason or "Booking cancelled")
+    fee = (
+        payments.late_cancel_fee(tx, booking.scheduled_for) if user.id == booking.customer_id else 0
+    )
+    payments.cancel_and_refund(db, tx, reason=reason or "Booking cancelled", fee_minor=fee)
     db.commit()
     other = booking.mechanic_id if user.id == booking.customer_id else booking.customer_id
     publish("booking.cancelled", booking_id=str(booking.id), notify_id=str(other), ref=tx.ref)
     return booking
+
+
+@payments.receipt_lines(TransactionKind.SERVICE_BOOKING)
+def _receipt_lines(db: Session, tx: Transaction) -> list[tuple[str, int]]:
+    """Itemised receipt (FR-9.3): the quote lines, or the fixed-price service."""
+    booking = db.scalar(select(Booking).where(Booking.transaction_id == tx.id))
+    if booking is None:
+        return []
+    if booking.lines:
+        return [(line.description, line.amount_minor) for line in booking.lines]
+    return [(booking.service_title, tx.amount_minor)]
