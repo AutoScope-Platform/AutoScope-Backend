@@ -18,5 +18,7 @@ COPY app ./app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 USER app
 EXPOSE 8000
-# Migrations run before the server starts (safe to repeat: Alembic skips applied ones).
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers"]
+# Migrations are a release step: on Azure a Container Apps job runs `alembic upgrade head`
+# before the new image goes live (docs/AZURE.md). RUN_MIGRATIONS=true runs them at start
+# instead (Render, single instance); an advisory lock makes concurrent runs safe either way.
+CMD ["sh", "-c", "if [ \"$RUN_MIGRATIONS\" = \"true\" ]; then alembic upgrade head || exit 1; fi; exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --workers ${WEB_CONCURRENCY:-1}"]
