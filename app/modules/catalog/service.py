@@ -18,9 +18,10 @@ from datetime import date, datetime
 
 from geoalchemy2 import WKTElement
 from sqlalchemy import Float, Integer, cast, func, null, or_, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core import audit
+from app.core import db as db_module
 from app.core.audit import AuditCategory
 from app.core.db import utcnow
 from app.core.errors import (
@@ -31,7 +32,7 @@ from app.core.errors import (
     Unauthorized,
     UnprocessableEntity,
 )
-from app.core.events import publish
+from app.core.events import Event, publish, publish_after_commit, subscribe
 from app.core.pagination import paginate_page
 from app.core.permissions import ADMIN_ROLES, Capability, Role, has_capability
 from app.core.uploads import checked_type
@@ -48,6 +49,9 @@ from app.modules.catalog.models import (
     ListingStatus,
     ListingType,
     PartFitment,
+    PartQuote,
+    PartRequest,
+    PartRequestStatus,
     ServiceRecord,
     Vehicle,
 )
@@ -377,6 +381,7 @@ def update_listing(db: Session, seller: User, listing_id: uuid.UUID, changes: di
         _check_sku_free(db, seller.id, changes["sku"], listing.id)
     if "fits" in changes:
         _set_fitments(listing, changes.pop("fits") or [])
+    stock_changed = "stock" in changes or "low_stock_threshold" in changes
     if changes.get("vin"):
         changes["vin"] = normalise_vin(changes["vin"])
     if "latitude" in changes or "longitude" in changes:
@@ -389,9 +394,27 @@ def update_listing(db: Session, seller: User, listing_id: uuid.UUID, changes: di
         setattr(listing, field, value)
     if listing.status == ListingStatus.REJECTED:
         listing.status, listing.rejection_reason = ListingStatus.PENDING, None  # resubmit
+    if stock_changed:
+        note_stock_change(db, listing)
     _refresh_signals(db, listing)
     db.commit()
     return listing
+
+
+def note_stock_change(db: Session, listing: Listing) -> None:
+    """Low-stock alert (FR-4.5): tell the seller once when stock falls to the threshold;
+    re-arm when it is back above. Sent after the caller commits."""
+    threshold = listing.low_stock_threshold
+    if threshold is None or listing.stock is None:
+        return
+    if listing.stock <= threshold and listing.low_stock_alerted_at is None:
+        listing.low_stock_alerted_at = utcnow()
+        publish_after_commit(
+            db, "listing.low_stock", listing_id=str(listing.id), seller_id=str(listing.seller_id),
+            title=listing.title, stock=listing.stock,
+        )  # fmt: skip
+    elif listing.stock > threshold:
+        listing.low_stock_alerted_at = None
 
 
 SELLER_STATUS_MOVES = {
@@ -545,6 +568,8 @@ def search_listings(
     sort becomes available.
     """
     stmt = select(Listing).where(Listing.status.in_([ListingStatus.LIVE, ListingStatus.RESERVED]))
+    # Photos and fitment for the whole page in two queries, not two per listing.
+    stmt = stmt.options(selectinload(Listing.images), selectinload(Listing.fitments))
     # Every word must appear somewhere (title, description or SKU), in any order, so
     # "brake pads camry" finds "Brake pads - Toyota Camry". Wildcards typed by the user are
     # treated as plain characters.
@@ -1029,3 +1054,179 @@ def recommendations(db: Session, user: User, *, limit: int = 20) -> list[tuple[s
             ),
         )
     return out[:limit]
+
+
+# ======================================================================================
+# 8. Part requests (FR-4.6)
+# ======================================================================================
+def create_part_request(
+    db: Session,
+    buyer: User,
+    *,
+    description: str,
+    vehicle_id: uuid.UUID | None,
+    make: str | None,
+    model: str | None,
+    year: int | None,
+    city: str | None,
+) -> PartRequest:
+    """Ask parts sellers for a part that is not listed (or to confirm one fits)."""
+    if vehicle_id:
+        vehicle = get_vehicle(db, buyer, vehicle_id)
+        make, model, year = vehicle.make, vehicle.model, vehicle.year
+    if not (make or "").strip():
+        raise BadRequest("Say which vehicle the part is for", code="vehicle_required")
+    request = PartRequest(
+        buyer_id=buyer.id, vehicle_id=vehicle_id, make=make.strip(),
+        model=(model or "").strip() or None, year=year, description=description.strip(),
+        city=(city or buyer.city or "").strip() or None,
+    )  # fmt: skip
+    db.add(request)
+    db.commit()
+    publish(
+        "part_request.created", request_id=str(request.id), buyer_id=str(buyer.id),
+        make=request.make, model=request.model or "", ref=request.ref,
+    )  # fmt: skip
+    return request
+
+
+def _get_part_request(db: Session, request_id: uuid.UUID) -> PartRequest:
+    request = db.get(PartRequest, request_id)
+    if request is None:
+        raise NotFound("Part request not found", code="part_request_not_found")
+    return request
+
+
+def can_see_part_request(request: PartRequest, viewer: User) -> bool:
+    return (
+        viewer.id == request.buyer_id
+        or viewer.has_role(*ADMIN_ROLES)
+        or (request.status == PartRequestStatus.OPEN and viewer.has_role(Role.PARTS_PROVIDER))
+    )
+
+
+def get_part_request(db: Session, request_id: uuid.UUID, viewer: User) -> PartRequest:
+    request = _get_part_request(db, request_id)
+    if not can_see_part_request(request, viewer):
+        raise NotFound("Part request not found", code="part_request_not_found")
+    return request
+
+
+def visible_quotes(request: PartRequest, viewer: User) -> list[PartQuote]:
+    """The buyer and staff see every quote (cheapest first); a seller sees only theirs."""
+    if viewer.id == request.buyer_id or viewer.has_role(*ADMIN_ROLES):
+        return sorted(request.quotes, key=lambda q: (q.price_minor, q.created_at))
+    return [q for q in request.quotes if q.provider_id == viewer.id]
+
+
+def open_part_requests(
+    db: Session,
+    provider: User,
+    *,
+    make: str | None,
+    city: str | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[PartRequest], int]:
+    """The parts sellers' feed: open requests from other people, newest first."""
+    stmt = select(PartRequest).where(
+        PartRequest.status == PartRequestStatus.OPEN, PartRequest.buyer_id != provider.id
+    )
+    if make:
+        stmt = stmt.where(PartRequest.make.ilike(make.strip()))
+    if city:
+        stmt = stmt.where(PartRequest.city.ilike(city.strip()))
+    return paginate_page(
+        db, stmt.order_by(PartRequest.created_at.desc()), page=page, page_size=page_size
+    )
+
+
+def my_part_requests(db: Session, buyer: User) -> list[PartRequest]:
+    return list(
+        db.scalars(
+            select(PartRequest)
+            .where(PartRequest.buyer_id == buyer.id)
+            .order_by(PartRequest.created_at.desc())
+            .limit(200)
+        )
+    )
+
+
+def quote_part_request(
+    db: Session,
+    provider: User,
+    request_id: uuid.UUID,
+    *,
+    price_minor: int,
+    message: str,
+    listing_id: uuid.UUID | None,
+) -> PartQuote:
+    """Send (or revise) a quote. A linked listing must be one of the seller's live parts."""
+    request = _get_part_request(db, request_id)
+    if request.status != PartRequestStatus.OPEN:
+        raise UnprocessableEntity("This request is closed", code="request_closed")
+    if request.buyer_id == provider.id:
+        raise UnprocessableEntity("You cannot quote on your own request", code="own_request")
+    if listing_id:
+        listing = db.get(Listing, listing_id)
+        if (
+            listing is None or listing.seller_id != provider.id
+            or listing.type != ListingType.PART or listing.status != ListingStatus.LIVE
+        ):  # fmt: skip
+            raise NotFound("Link one of your live parts listings", code="listing_not_found")
+    quote = next((q for q in request.quotes if q.provider_id == provider.id), None)
+    if quote is None:
+        quote = PartQuote(provider_id=provider.id)
+        request.quotes.append(quote)
+    quote.price_minor, quote.message, quote.listing_id = price_minor, message.strip(), listing_id
+    db.commit()
+    publish(
+        "part_request.quoted", request_id=str(request.id), buyer_id=str(request.buyer_id),
+        ref=request.ref,
+    )  # fmt: skip
+    return quote
+
+
+def close_part_request(db: Session, buyer: User, request_id: uuid.UUID) -> PartRequest:
+    request = _get_part_request(db, request_id)
+    if request.buyer_id != buyer.id:
+        raise NotFound("Part request not found", code="part_request_not_found")
+    if request.status == PartRequestStatus.OPEN:
+        request.status, request.closed_at = PartRequestStatus.CLOSED, utcnow()
+        db.commit()
+    return request
+
+
+def sellers_stocking_make(db: Session, make: str, *, limit: int = 50) -> list[uuid.UUID]:
+    """Parts sellers with a live part that fits `make`: who to tell about a part request."""
+    return list(
+        db.scalars(
+            select(Listing.seller_id)
+            .join(PartFitment, PartFitment.listing_id == Listing.id)
+            .where(
+                Listing.type == ListingType.PART,
+                Listing.status == ListingStatus.LIVE,
+                PartFitment.make.ilike(make),
+            )
+            .distinct()
+            .limit(limit)
+        )
+    )
+
+
+@subscribe("user.removed")
+def _take_down_removed_users_listings(event: Event) -> None:
+    """An admin removed the account (FR-13.2): its pending and live listings come down."""
+    db = db_module.new_session()  # looked up at call time so tests can swap it
+    try:
+        db.execute(
+            update(Listing)
+            .where(
+                Listing.seller_id == uuid.UUID(event.payload["user_id"]),
+                Listing.status.in_([ListingStatus.PENDING, ListingStatus.LIVE]),
+            )
+            .values(status=ListingStatus.REMOVED)
+        )
+        db.commit()
+    finally:
+        db.close()

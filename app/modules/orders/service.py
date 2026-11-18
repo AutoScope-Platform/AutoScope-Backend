@@ -27,6 +27,7 @@ from app.core.db import utcnow
 from app.core.errors import BadRequest, NotFound, UnprocessableEntity
 from app.core.events import Event, publish, subscribe
 from app.core.permissions import ADMIN_ROLES
+from app.modules.catalog import service as catalog
 from app.modules.catalog.models import (
     InquiryStatus,
     Listing,
@@ -248,7 +249,7 @@ def checkout(
                     quantity=qty,
                 )
             )
-            _take_stock(listing, qty)
+            _take_stock(db, listing, qty)
         db.add(order)
         orders.append(order)
     for item, _ in cart:
@@ -257,18 +258,20 @@ def checkout(
     return orders
 
 
-def _take_stock(listing: Listing, quantity: int) -> None:
+def _take_stock(db: Session, listing: Listing, quantity: int) -> None:
     if listing.stock is not None:
         listing.stock -= quantity
         if listing.stock == 0:
             listing.status = ListingStatus.SOLD  # out of stock
+        catalog.note_stock_change(db, listing)  # low-stock alert after the commit (FR-4.5)
 
 
-def _return_stock(listing: Listing, quantity: int) -> None:
+def _return_stock(db: Session, listing: Listing, quantity: int) -> None:
     if listing.stock is not None:
         listing.stock += quantity
         if listing.status == ListingStatus.SOLD:
             listing.status = ListingStatus.LIVE
+        catalog.note_stock_change(db, listing)
 
 
 def purchase_vehicle(
@@ -450,7 +453,7 @@ def cancel_order(db: Session, user: User, order_id: uuid.UUID, reason: str | Non
             if listing.status == ListingStatus.RESERVED:
                 listing.status = ListingStatus.LIVE
         else:
-            _return_stock(listing, item.quantity)
+            _return_stock(db, listing, item.quantity)
     db.commit()
     other = order.seller_id if user.id == order.buyer_id else order.buyer_id
     publish("order.cancelled", order_id=str(order.id), notify_id=str(other), ref=tx.ref)

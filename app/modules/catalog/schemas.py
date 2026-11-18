@@ -8,7 +8,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.modules.catalog.models import InquiryKind, InquiryStatus, ListingStatus, ListingType
+from app.modules.catalog.models import (
+    InquiryKind,
+    InquiryStatus,
+    ListingStatus,
+    ListingType,
+    PartRequestStatus,
+)
 
 
 class _Orm(BaseModel):
@@ -110,6 +116,9 @@ class ListingIn(BaseModel):
     fits: list[FitmentIn] | None = Field(
         None, max_length=50, description="Parts: the vehicles this part fits (FR-4.1)."
     )
+    low_stock_threshold: int | None = Field(
+        None, ge=0, description="Parts: alert me when stock falls to this (FR-4.5)."
+    )
     vin: str | None = Field(None, description="Vehicles only.")
     attributes: dict[str, Any] = Field(
         description="Type-specific details. Vehicles: make, model, year, mileage_km. "
@@ -128,6 +137,7 @@ class ListingUpdateIn(BaseModel):
     stock: int | None = Field(None, ge=0)
     sku: str | None = Field(None, max_length=64)
     fits: list[FitmentIn] | None = Field(None, max_length=50, description="Replaces the list.")
+    low_stock_threshold: int | None = Field(None, ge=0)
     vin: str | None = None
     attributes: dict[str, Any] | None = None
 
@@ -162,6 +172,7 @@ class ListingOut(BaseModel):
     stock: int | None
     sku: str | None = None
     fits: list[FitmentOut] = Field(default_factory=list)
+    low_stock_threshold: int | None = None
     vin: str | None
     attributes: dict[str, Any]
     images: list[ImageOut]
@@ -269,3 +280,54 @@ class ReviewQueueOut(BaseModel):
     items: list[ListingOut]
     total: int
     counts: dict[str, int]
+
+
+# --- Part requests (FR-4.6) --------------------------------------------------------------
+class PartRequestIn(BaseModel):
+    """Describe the part. Give a garage `vehicle_id`, or `make` (and ideally model/year)."""
+
+    description: str = Field(min_length=5, max_length=2000, examples=["Left headlamp, with bulb"])
+    vehicle_id: uuid.UUID | None = None
+    make: str | None = Field(None, max_length=60, examples=["Toyota"])
+    model: str | None = Field(None, max_length=60, examples=["Camry"])
+    year: int | None = Field(None, ge=1950, le=2100)
+    city: str | None = Field(None, max_length=80, description="Defaults to your profile city.")
+
+
+class PartQuoteIn(BaseModel):
+    price_minor: int = Field(gt=0, description="Your price, in kobo.")
+    message: str = Field("", max_length=500, examples=["Genuine part, in stock in Ikeja"])
+    listing_id: uuid.UUID | None = Field(None, description="One of your live parts listings.")
+
+
+class PartQuoteOut(_Orm):
+    id: uuid.UUID
+    provider_id: uuid.UUID
+    provider_name: str | None = None
+    price_minor: int
+    message: str
+    listing_id: uuid.UUID | None
+    created_at: datetime
+
+
+class PartRequestOut(BaseModel):
+    id: uuid.UUID
+    ref: str = Field(examples=["PRQ-7001"])
+    buyer_id: uuid.UUID
+    vehicle_id: uuid.UUID | None
+    make: str
+    model: str | None
+    year: int | None
+    description: str
+    city: str | None
+    status: PartRequestStatus
+    quotes: list[PartQuoteOut] = Field(
+        default_factory=list,
+        description="The buyer sees all (cheapest first); a seller sees theirs.",
+    )
+    created_at: datetime
+
+
+class PartRequestPage(BaseModel):
+    items: list[PartRequestOut]
+    total: int
