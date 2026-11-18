@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.modules.catalog.models import InquiryStatus, ListingStatus, ListingType
+from app.modules.catalog.models import InquiryKind, InquiryStatus, ListingStatus, ListingType
 
 
 class _Orm(BaseModel):
@@ -170,6 +170,8 @@ class ListingOut(BaseModel):
     disclosure: str | None = Field(
         None, description="Insurance products only: who underwrites the cover (FSD 5.7)."
     )
+    video_url: str | None = Field(None, description="Time-limited link to the listing's video.")
+    stats: ListingStatsOut | None = Field(None, description="Seller and staff only.")
     rejection_reason: str | None = Field(None, description="Shown to the seller and staff only.")
     fraud_signals: list[str] = Field(default_factory=list, description="Seller and staff only.")
 
@@ -206,20 +208,51 @@ class MechanicPage(BaseModel):
 class InquiryIn(BaseModel):
     message: str = Field(min_length=2, max_length=1000)
     offer_minor: int | None = Field(None, ge=0, description="Optional price offer, in kobo.")
+    kind: InquiryKind | None = Field(
+        None,
+        description="question, offer, inspection or test_drive (vehicles). Left out: offer "
+        "when offer_minor is given, otherwise question.",
+    )
+    viewing_at: datetime | None = Field(
+        None, description="Inspections and test drives: the time you would like, with an offset."
+    )
 
 
 class InquiryOut(_Orm):
     id: uuid.UUID
     listing_id: uuid.UUID
     buyer_id: uuid.UUID
+    kind: InquiryKind
     message: str
     offer_minor: int | None
+    viewing_at: datetime | None
     status: InquiryStatus
     created_at: datetime
 
 
 class InquiryAnswerIn(BaseModel):
     accept: bool
+    viewing_at: datetime | None = Field(
+        None, description="Accepting a viewing: a different time to suggest instead."
+    )
+
+
+class ListingStatsOut(BaseModel):
+    """Seller and staff only (FR-3.5)."""
+
+    views: int
+    enquiries: int = Field(description="Questions, offers and viewing requests together.")
+    offers: int
+    viewing_requests: int
+
+
+class RecommendationOut(BaseModel):
+    reason: str = Field(examples=["Fits your 2014 Toyota Camry"])
+    listing: ListingOut
+
+
+class RecommendationsOut(BaseModel):
+    items: list[RecommendationOut]
 
 
 # --- Admin -------------------------------------------------------------------------------
