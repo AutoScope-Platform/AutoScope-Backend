@@ -84,3 +84,80 @@ class S3Storage:
 
     def delete(self, key: str) -> None:
         self._client.delete_object(Bucket=self.bucket, Key=key)
+
+
+class AzureBlobStorage:
+    """Azure Blob Storage (production on Azure). Blob storage does not speak the S3 API,
+    so it has its own driver. Files are private; `url()` returns a read-only SAS link that
+    expires, like the S3 driver's presigned URLs.
+
+    Settings: `AZURE_STORAGE_CONNECTION_STRING` (with AccountKey) and `AZURE_STORAGE_CONTAINER`.
+    """
+
+    def __init__(self, settings: Settings, service_client=None) -> None:
+        if not (settings.azure_storage_connection_string and settings.azure_storage_container):
+            raise IntegrationError(
+                "Azure storage is not configured (AZURE_STORAGE_CONNECTION_STRING, "
+                "AZURE_STORAGE_CONTAINER; see docs/AZURE.md)"
+            )
+        from azure.storage.blob import BlobServiceClient  # noqa: PLC0415
+
+        self._service = service_client or BlobServiceClient.from_connection_string(
+            settings.azure_storage_connection_string
+        )
+        self._container_name = settings.azure_storage_container
+        self._container = self._service.get_container_client(self._container_name)
+        self._account_name = self._service.account_name
+        self._account_key = getattr(self._service.credential, "account_key", None)
+        if not self._account_key:
+            raise IntegrationError(
+                "AZURE_STORAGE_CONNECTION_STRING must include AccountKey (needed to sign links)"
+            )
+
+    def put(self, key: str, data: bytes, content_type: str) -> None:
+        from azure.core.exceptions import AzureError  # noqa: PLC0415
+        from azure.storage.blob import ContentSettings  # noqa: PLC0415
+
+        try:
+            self._container.upload_blob(
+                key,
+                data,
+                overwrite=True,
+                content_settings=ContentSettings(content_type=content_type),
+            )
+        except AzureError as exc:
+            raise IntegrationError(f"Azure upload failed: {exc}") from exc
+
+    def get(self, key: str) -> bytes:
+        from azure.core.exceptions import ResourceNotFoundError  # noqa: PLC0415
+
+        try:
+            return self._container.download_blob(key).readall()
+        except ResourceNotFoundError:
+            raise FileNotFoundError(key) from None
+
+    def url(self, key: str, expires_seconds: int = 900) -> str:
+        from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+        from urllib.parse import quote  # noqa: PLC0415
+
+        from azure.storage.blob import BlobSasPermissions, generate_blob_sas  # noqa: PLC0415
+
+        now = datetime.now(UTC)
+        sas = generate_blob_sas(
+            account_name=self._account_name,
+            container_name=self._container_name,
+            blob_name=key,
+            account_key=self._account_key,
+            permission=BlobSasPermissions(read=True),
+            start=now - timedelta(minutes=5),  # allow for clock differences
+            expiry=now + timedelta(seconds=expires_seconds),
+        )
+        return f"{self._container.url}/{quote(key)}?{sas}"
+
+    def delete(self, key: str) -> None:
+        from azure.core.exceptions import ResourceNotFoundError  # noqa: PLC0415
+
+        try:
+            self._container.delete_blob(key)
+        except ResourceNotFoundError:
+            pass

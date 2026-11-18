@@ -15,7 +15,9 @@ PostgreSQL 16 + PostGIS, Redis, Celery, S3-compatible storage, JWT auth, Swagger
 API with FastAPI's thread pool. It is simpler to read and debug, and fast enough for the
 expected load. Revisit if profiling shows the database layer is the bottleneck.
 
-**Environments:** local (Docker), staging (Render + Neon), production (to be decided).
+**Environments:** local (Docker); production on **Azure** (Container Apps, PostgreSQL Flexible
+Server, Cache for Redis, Blob Storage, Key Vault, Application Insights; see docs/AZURE.md);
+staging on Azure too, or on Render + Neon (`render.yaml`) as a quick stop-gap.
 Staging and production must never share secrets or databases.
 
 **Launch gate (before real users):** live payment keys tested end to end; a KYC vendor

@@ -1,0 +1,90 @@
+# Deploy to Azure Container Apps: run the CI checks, build the image (in Azure, with ACR
+# Tasks), run the migrations as a release step, roll out the API and the worker, smoke test.
+#
+# One-time setup: docs/AZURE.md. Switched off until the repository variable
+# AZURE_DEPLOY_ENABLED is "true", so it does nothing before Azure exists.
+#   - push to develop       -> staging
+#   - "Run workflow" button -> staging or production (protect the production environment
+#                              with required reviewers in the repository settings)
+name: Deploy (Azure)
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Where to deploy
+        type: choice
+        options: [staging, production]
+        default: staging
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'staging' }}
+  cancel-in-progress: false  # never stop a deploy half-way through its migrations
+
+permissions:
+  id-token: write  # sign in to Azure with OIDC: no password stored in GitHub
+  contents: read
+
+jobs:
+  checks:
+    if: vars.AZURE_DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: checks
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'staging' }}
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      ACR: ${{ vars.ACR_NAME }}
+      API_APP: ${{ vars.API_APP }}
+      WORKER_APP: ${{ vars.WORKER_APP }}
+      MIGRATE_JOB: ${{ vars.MIGRATE_JOB }}
+      TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push the image
+        run: az acr build --registry "$ACR" --image "autoscope-api:$TAG" .
+
+      - name: Run migrations (release step)
+        run: |
+          image="$ACR.azurecr.io/autoscope-api:$TAG"
+          az containerapp job update --name "$MIGRATE_JOB" --resource-group "$RG" --image "$image"
+          execution=$(az containerapp job start --name "$MIGRATE_JOB" --resource-group "$RG" --query name --output tsv)
+          echo "migration execution: $execution"
+          for _ in $(seq 1 60); do
+            status=$(az containerapp job execution show --name "$MIGRATE_JOB" --resource-group "$RG" \
+              --job-execution-name "$execution" --query properties.status --output tsv)
+            echo "migration status: $status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped|Degraded) echo "Migrations failed: the new image is NOT rolled out."; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "Migrations did not finish in 10 minutes."; exit 1
+
+      - name: Roll out the API and the worker
+        run: |
+          image="$ACR.azurecr.io/autoscope-api:$TAG"
+          az containerapp update --name "$API_APP" --resource-group "$RG" --image "$image"
+          az containerapp update --name "$WORKER_APP" --resource-group "$RG" --image "$image"
+
+      - name: Smoke test
+        run: |
+          fqdn=$(az containerapp show --name "$API_APP" --resource-group "$RG" \
+            --query properties.configuration.ingress.fqdn --output tsv)
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error "https://$fqdn/health/ready"; then echo; exit 0; fi
+            sleep 10
+          done
+          echo "The API did not become ready."; exit 1

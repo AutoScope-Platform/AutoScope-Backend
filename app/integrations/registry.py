@@ -108,6 +108,10 @@ def get_storage() -> StorageProvider:
             from app.integrations.storage import S3Storage
 
             return S3Storage(s)
+        if s.storage_driver == "azure":
+            from app.integrations.storage import AzureBlobStorage
+
+            return AzureBlobStorage(s)
         from app.integrations.storage import LocalStorage
 
         return LocalStorage(s.local_storage_dir, s.jwt_secret)

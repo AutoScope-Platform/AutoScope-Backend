@@ -15,6 +15,7 @@ Schedule (UTC unless noted):
 from __future__ import annotations
 
 import logging
+import ssl
 from collections.abc import Callable
 from typing import Any
 
@@ -26,7 +27,18 @@ from app.core.config import get_settings
 
 log = logging.getLogger(__name__)
 
-celery_app = Celery("autoscope", broker=get_settings().redis_url or "memory://", backend=None)
+
+def broker_ssl_options(url: str | None) -> dict | None:
+    """TLS settings for a `rediss://` broker (Azure Cache for Redis only accepts TLS).
+    Celery refuses a rediss:// URL unless certificate checking is set explicitly."""
+    if url and url.startswith("rediss://"):
+        return {"ssl_cert_reqs": ssl.CERT_REQUIRED}
+    return None
+
+
+_broker_url = get_settings().redis_url or "memory://"
+celery_app = Celery("autoscope", broker=_broker_url, backend=None)
+celery_app.conf.broker_use_ssl = broker_ssl_options(_broker_url)
 celery_app.conf.timezone = "UTC"
 celery_app.conf.task_acks_late = (
     True  # a crashed worker's job is retried, so jobs must be idempotent

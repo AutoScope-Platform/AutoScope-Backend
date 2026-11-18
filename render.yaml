@@ -8,6 +8,7 @@ services:
     healthCheckPath: /health
     envVars: &shared
       - { key: ENV, value: staging }
+      - { key: RUN_MIGRATIONS, value: "true" }            # migrate at start (single instance)
       - { key: DATABASE_URL, sync: false }            # Neon pooled connection string
       - { key: MIGRATION_DATABASE_URL, sync: false }  # Neon DIRECT (non-pooled) string, used by Alembic
       - { key: JWT_SECRET, generateValue: true }

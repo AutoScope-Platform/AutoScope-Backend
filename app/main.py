@@ -14,6 +14,7 @@ import logging
 
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core import files
 from app.core.config import get_settings
@@ -68,8 +69,25 @@ ROUTERS: list[APIRouter] = [
 ]
 
 
+_monitoring_started = False
+
+
+def setup_monitoring(settings) -> bool:
+    """Send requests, errors and logs to Azure Monitor (Application Insights) when its
+    connection string is set. Called once per process, before the app is built."""
+    global _monitoring_started
+    if _monitoring_started or not settings.applicationinsights_connection_string:
+        return False
+    from azure.monitor.opentelemetry import configure_azure_monitor  # noqa: PLC0415
+
+    configure_azure_monitor(connection_string=settings.applicationinsights_connection_string)
+    _monitoring_started = True
+    return True
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    setup_monitoring(settings)
     app = FastAPI(
         title=settings.app_name,
         version="1.0.0",
@@ -93,10 +111,47 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["Health"], summary="Liveness check")
     def health() -> dict[str, str]:
-        """Used by Render and the load balancer. Does not touch the database."""
+        """Liveness: the process is up. Does not touch the database, so a database outage
+        does not make the platform restart every instance."""
         return {"status": "ok"}
+
+    @app.get("/health/ready", tags=["Health"], summary="Readiness check")
+    def ready() -> JSONResponse:
+        """Readiness: can this instance serve requests (database, and Redis when set)?
+        Load balancers stop sending traffic to an instance that answers 503."""
+        checks = readiness_checks()
+        ok = all(v == "ok" for v in checks.values())
+        return JSONResponse(
+            status_code=200 if ok else 503,
+            content={"status": "ok" if ok else "unavailable", "checks": checks},
+        )
 
     return app
 
 
 app = create_app()
+
+
+def readiness_checks() -> dict[str, str]:
+    """`ok` or a short error per dependency (no secrets in the output)."""
+    from sqlalchemy import text  # noqa: PLC0415
+
+    from app.core import db as db_module  # noqa: PLC0415
+
+    checks: dict[str, str] = {}
+    try:
+        with db_module.new_session() as session:
+            session.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as exc:  # noqa: BLE001
+        checks["database"] = f"error: {type(exc).__name__}"
+    url = get_settings().redis_url
+    if url:
+        try:
+            import redis  # noqa: PLC0415
+
+            redis.Redis.from_url(url, socket_timeout=2, socket_connect_timeout=2).ping()
+            checks["redis"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            checks["redis"] = f"error: {type(exc).__name__}"
+    return checks
