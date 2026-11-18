@@ -12,6 +12,7 @@ from app.core.errors import BadRequest, NotFound, UnprocessableEntity
 from app.core.events import publish
 from app.core.pagination import paginate_cursor
 from app.core.realtime import Hub
+from app.core.uploads import checked_type
 from app.integrations import registry
 from app.modules.catalog.models import Listing
 from app.modules.identity.models import AccountStatus, User
@@ -116,8 +117,9 @@ def send_attachment(
     caption: str,
 ) -> Message:
     thread = _get_thread(db, thread_id, sender)
-    if content_type not in ATTACHMENT_TYPES:
-        raise BadRequest("Send a JPEG, PNG, WebP or PDF", code="invalid_file_type")
+    content_type = checked_type(
+        data, ATTACHMENT_TYPES, message="Send a JPEG, PNG, WebP or PDF", code="invalid_file_type"
+    )
     if not data or len(data) > ATTACHMENT_MAX:
         raise BadRequest("Files must be under 8 MB", code="file_too_large")
     key = f"chat/{thread.id}/{uuid.uuid4().hex}{ATTACHMENT_TYPES[content_type]}"

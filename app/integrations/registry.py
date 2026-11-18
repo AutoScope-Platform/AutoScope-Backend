@@ -21,6 +21,7 @@ from app.integrations.base import (
     PaymentGateway,
     PushProvider,
     SmsProvider,
+    SocialVerifier,
     StorageProvider,
     VinDecoder,
 )
@@ -35,7 +36,7 @@ def _cached(name: str, factory: Callable[[], Any]) -> Any:
 
 
 def override(name: str, instance: Any | None) -> None:
-    """Replace (or with None, reset) a driver. Names: sms, email, push, payments, kyc, storage, vin."""
+    """Replace (or with None, reset) a driver. Names: sms, email, push, payments, kyc, storage, vin, social."""
     if instance is None:
         _instances.pop(name, None)
     else:
@@ -112,6 +113,18 @@ def get_storage() -> StorageProvider:
         return LocalStorage(s.local_storage_dir, s.jwt_secret)
 
     return _cached("storage", build)
+
+
+def get_social() -> SocialVerifier:
+    def build() -> SocialVerifier:
+        s = get_settings()
+        if s.social_driver == "live":
+            from app.integrations.social import LiveSocialVerifier
+
+            return LiveSocialVerifier(s)
+        return mock.MockSocial()
+
+    return _cached("social", build)
 
 
 def get_vin() -> VinDecoder:

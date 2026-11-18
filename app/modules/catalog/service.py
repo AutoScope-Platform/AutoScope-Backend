@@ -27,6 +27,7 @@ from app.core.errors import BadRequest, Conflict, Forbidden, NotFound, Unprocess
 from app.core.events import publish
 from app.core.pagination import paginate_page
 from app.core.permissions import ADMIN_ROLES, Capability, Role, has_capability
+from app.core.uploads import checked_type
 from app.integrations import registry
 from app.integrations.base import IntegrationError, VinInfo
 from app.modules.catalog.models import (
@@ -325,8 +326,9 @@ def add_image(
     db: Session, seller: User, listing_id: uuid.UUID, content_type: str, data: bytes
 ) -> ListingImage:
     listing = _get_own(db, seller, listing_id)
-    if content_type not in IMAGE_TYPES:
-        raise BadRequest("Photos must be JPEG, PNG or WebP", code="invalid_file_type")
+    content_type = checked_type(
+        data, IMAGE_TYPES, message="Photos must be JPEG, PNG or WebP", code="invalid_file_type"
+    )
     if not data or len(data) > IMAGE_MAX_BYTES:
         raise BadRequest("Photos must be under 8 MB", code="file_too_large")
     if len(listing.images) >= MAX_IMAGES:

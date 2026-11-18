@@ -327,7 +327,8 @@ def test_add_business_role_needs_business_name_and_starts_kyc(client, db):
 def test_erase_account_anonymises_and_blocks_sign_in(client, db):
     user = make_user(db, email="gone@example.com")
     h = auth_headers(user)
-    assert client.delete("/api/v1/me", headers=h).status_code == 204
+    r = client.request("DELETE", "/api/v1/me", headers=h, json={"password": PASSWORD})
+    assert r.status_code == 204
     db.refresh(user)
     assert user.email is None and user.full_name == "Erased user" and user.erased_at is not None
     assert client.get("/api/v1/me", headers=h).status_code == 401
@@ -345,7 +346,7 @@ def upload(client, user, doc_type, filename="doc.jpg"):
         "/api/v1/me/kyc-documents",
         headers=auth_headers(user),
         data={"doc_type": doc_type.value},
-        files={"file": (filename, b"\xff\xd8fake-image", "image/jpeg")},
+        files={"file": (filename, b"\xff\xd8\xfffake-image", "image/jpeg")},
     )
 
 
@@ -399,7 +400,7 @@ def test_admin_decision_updates_user_and_audit_log(db):
     admin = make_user(db, Role.SUPPORT, name="Kunle Bakare")
     for doc in KycDocType:
         submission = service.upload_kyc_document(
-            db, garage, doc, f"{doc.value}.jpg", "image/jpeg", b"x"
+            db, garage, doc, f"{doc.value}.jpg", "image/jpeg", b"\xff\xd8\xffx"
         )
     assert submission.status == KycSubmissionStatus.PENDING
 

@@ -36,7 +36,12 @@ from app.modules.catalog.schemas import (
     VehicleUpdateIn,
     VinOut,
 )
-from app.modules.identity.deps import CurrentUser, OptionalUser, require_admin
+from app.modules.identity.deps import (
+    CurrentUser,
+    OptionalUser,
+    require_admin,
+    user_rate_limit,
+)
 from app.modules.identity.models import KycStatus, User
 from app.modules.reviews import service as reviews
 
@@ -233,7 +238,8 @@ def mechanics(
     response_model=ListingOut,
     status_code=status.HTTP_201_CREATED,
     summary="Create a listing (goes to admin review)",
-    responses=error_responses(400, 403, 422),
+    responses=error_responses(400, 403, 422, 429),
+    dependencies=[Depends(user_rate_limit("listing-create", 10, 60))],
 )
 def create_listing(body: ListingIn, user: CurrentUser, db: Session = Depends(get_db)):
     listing = service.create_listing(db, user, body.model_dump())
@@ -306,7 +312,8 @@ def remove_listing(listing_id: uuid.UUID, user: CurrentUser, db: Session = Depen
     response_model=ImageOut,
     status_code=status.HTTP_201_CREATED,
     summary="Upload a photo (JPEG, PNG or WebP, up to 8 MB)",
-    responses=error_responses(400, 404, 422),
+    responses=error_responses(400, 404, 422, 429),
+    dependencies=[Depends(user_rate_limit("listing-image", 40, 60))],
 )
 async def upload_image(
     listing_id: uuid.UUID,

@@ -78,14 +78,18 @@ def reset_counters() -> None:
     _counter().clear()
 
 
+def enforce(key: str, limit: int, window_seconds: int) -> None:
+    """Count one hit on `key`; raise 429 once it passes `limit` within the window."""
+    if not get_settings().rate_limit_enabled:
+        return
+    if _counter().hit(key, window_seconds) > limit:
+        raise TooManyRequests("Too many requests. Please wait a moment and try again.")
+
+
 def rate_limit(name: str, limit: int, window_seconds: int) -> Callable[[Request], None]:
     """Build a dependency allowing `limit` requests per `window_seconds` per client IP."""
 
     def dependency(request: Request) -> None:
-        if not get_settings().rate_limit_enabled:
-            return
-        key = f"rl:{name}:{client_ip(request)}"
-        if _counter().hit(key, window_seconds) > limit:
-            raise TooManyRequests("Too many requests. Please wait a moment and try again.")
+        enforce(f"rl:{name}:{client_ip(request)}", limit, window_seconds)
 
     return dependency
