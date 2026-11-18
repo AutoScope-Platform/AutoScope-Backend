@@ -46,6 +46,12 @@ def ratings_for(db: Session, user_ids: list[uuid.UUID]) -> dict[uuid.UUID, tuple
     return {r.user_id: (round(r.average, 1), r.count) for r in rows}
 
 
+def rating_summary_subquery():
+    """(user_id, average, count) per reviewed provider, for other modules that sort or
+    filter by rating in SQL (read-only; providers with no reviews have no row)."""
+    return select(RatingSummary.user_id, RatingSummary.average, RatingSummary.count).subquery()
+
+
 def _recompute_summary(db: Session, user_id: uuid.UUID) -> None:
     """Rebuild a provider's average from their visible reviews."""
     db.flush()
