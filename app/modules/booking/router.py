@@ -17,6 +17,7 @@ from app.modules.booking.schemas import (
     AvailabilityIn,
     BookingIn,
     BookingOut,
+    CancellationTermsOut,
     InvoiceOut,
     LineOut,
     ProposeTimeIn,
@@ -30,6 +31,14 @@ from app.modules.booking.schemas import (
 from app.modules.identity.deps import CurrentUser, require_capability
 from app.modules.identity.models import User
 from app.modules.payments import service as payments
+from app.modules.payments.models import TxStatus
+
+CANCELLABLE = (
+    TxStatus.REQUESTED,
+    TxStatus.QUOTE_REQUESTED,
+    TxStatus.QUOTE_SENT,
+    TxStatus.CONFIRMED,
+)
 
 router = APIRouter(tags=["Bookings"])
 
@@ -48,6 +57,10 @@ def _out(db: Session, booking: Booking, tx=None) -> BookingOut:
         duration_minutes=booking.duration_minutes, quote_requested=booking.quote_requested,
         quote_note=booking.quote_note, decline_reason=booking.decline_reason,
         proposed_for=booking.proposed_for, proposal_note=booking.proposal_note,
+        cancellation=(
+            CancellationTermsOut(**payments.cancellation_terms(db, tx, booking.scheduled_for))
+            if tx.status in CANCELLABLE else None
+        ),
         lines=[LineOut(description=li.description, amount_minor=li.amount_minor) for li in booking.lines],
         created_at=booking.created_at,
     )  # fmt: skip

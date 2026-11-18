@@ -429,6 +429,14 @@ def cancel_order(db: Session, user: User, order_id: uuid.UUID, reason: str | Non
         raise NotFound("Order not found", code="order_not_found")
     if tx.status in FINAL_STATUSES or tx.status not in (TxStatus.PENDING, TxStatus.CONFIRMED):
         raise UnprocessableEntity("This order can no longer be cancelled", code="invalid_status")
+    deadline = payments.cancel_deadline(tx)
+    if user.id == order.buyer_id and deadline is not None and utcnow() > deadline:
+        # The seller's cancellation window (FR-10.3) has passed; the seller can still cancel.
+        raise UnprocessableEntity(
+            "The seller's cancellation window has passed. Contact the seller or open a dispute.",
+            code="cancellation_window_passed",
+            details={"deadline": deadline.isoformat()},
+        )
     payments.cancel_and_refund(db, tx, reason=reason or "Order cancelled")
     for item in order.items:
         listing = (
@@ -462,3 +470,21 @@ def auto_confirm_shipped(db: Session, *, now=None) -> int:
             count += 1
     db.commit()
     return count
+
+
+@payments.receipt_lines(TransactionKind.PARTS_ORDER, TransactionKind.VEHICLE_SALE)
+def _receipt_lines(db: Session, tx: Transaction) -> list[tuple[str, int]]:
+    """Itemised receipt (FR-9.3): each item, then delivery."""
+    order = db.scalar(select(Order).where(Order.transaction_id == tx.id))
+    if order is None:
+        return []
+    lines = [
+        (
+            f"{i.title} x {i.quantity}" if i.quantity > 1 else i.title,
+            i.unit_price_minor * i.quantity,
+        )
+        for i in order.items
+    ]
+    if order.delivery_fee_minor:
+        lines.append(("Delivery", order.delivery_fee_minor))
+    return lines

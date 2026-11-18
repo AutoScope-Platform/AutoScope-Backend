@@ -50,6 +50,7 @@ def _order_out(db: Session, order: Order, tx=None) -> OrderOut:
         delivery_address=order.delivery_address, delivery_city=order.delivery_city,
         contact_phone=order.contact_phone, tracking_note=order.tracking_note,
         shipped_at=order.shipped_at, created_at=order.created_at,
+        cancel_until=payments.cancel_deadline(tx),
     )  # fmt: skip
 
 
