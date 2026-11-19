@@ -33,6 +33,9 @@ On staging the SMS/e-mail drivers are mocks: every code is **123456**.
    `roles`, and `business_name` / `full_name` / `city` as needed.
 5. Apple gives the person's name to the app only on the very first sign-in: send it as
    `full_name` then.
+   On Android, ask Google for the ID token with the **web** client id (`serverClientId` /
+   `requestIdToken`); on iOS the iOS client id is fine. Both ids must be in the backend's
+   `GOOGLE_CLIENT_IDS`, or the token is refused with `401 invalid_social_token`.
 6. If an e-mail/password account already has the same verified e-mail, it is linked
    automatically and the person signs into that account.
 
