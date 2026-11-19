@@ -9,7 +9,7 @@ services:
     name: autoscope-api
     runtime: docker
     region: frankfurt
-    plan: starter            # the free plan sleeps after 15 minutes idle
+    plan: 0.5c-512mb         # $7/month; the free plan sleeps when idle
     healthCheckPath: /health
     envVars: &shared
       - { key: ENV, value: staging }
@@ -18,7 +18,7 @@ services:
       - { key: MIGRATION_DATABASE_URL, sync: false }  # Neon DIRECT (non-pooled) string, used by Alembic
       - { key: JWT_SECRET, generateValue: true }
       - { key: CORS_ORIGINS, value: "https://autoscope-admin.netlify.app" }
-      - { key: REDIS_URL, fromService: { type: redis, name: autoscope-redis, property: connectionString } }
+      - { key: REDIS_URL, fromService: { type: keyvalue, name: autoscope-redis, property: connectionString } }
       # Push/SMS/e-mail go through the worker below; live events fan out through Redis.
       - { key: TASK_QUEUE, value: celery }
       - { key: SMS_DRIVER, value: mock }
@@ -42,12 +42,12 @@ services:
     name: autoscope-worker
     runtime: docker
     region: frankfurt
-    plan: starter            # background workers have no free plan
+    plan: 0.5c-512mb         # $7/month; background workers have no free plan
     dockerCommand: celery -A app.worker.celery_app worker --beat --loglevel=info
     envVars: *shared
 
-  - type: redis
+  - type: keyvalue
     name: autoscope-redis
     region: frankfurt
     ipAllowList: []   # internal only
-    plan: free
+    plan: free               # 25 MB, enough for staging
