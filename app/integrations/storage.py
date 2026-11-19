@@ -3,9 +3,10 @@
 Photos, KYC documents and claim evidence live in object storage. The database holds
 only the object *key*; clients get a time-limited URL from `url()`.
 
-The S3 driver works with any S3-compatible service (Cloudflare R2, Neon storage,
-AWS S3, MinIO): set `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` and
-`S3_SECRET_ACCESS_KEY`.
+The S3 driver works with any S3-compatible service (Neon Object Storage, Cloudflare R2,
+AWS S3, MinIO): set `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` and
+`S3_SECRET_ACCESS_KEY`. It uses path-style addresses and SigV4 signing, which every one of
+those accepts (Neon accepts nothing else).
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ class S3Storage:
 
     def __init__(self, settings: Settings) -> None:
         import boto3  # noqa: PLC0415
+        from botocore.config import Config  # noqa: PLC0415
 
         if not (settings.s3_bucket and settings.s3_access_key_id and settings.s3_secret_access_key):
             raise IntegrationError("S3 storage is not configured (see docs/INTEGRATIONS.md)")
@@ -69,13 +71,24 @@ class S3Storage:
             aws_access_key_id=settings.s3_access_key_id,
             aws_secret_access_key=settings.s3_secret_access_key,
             region_name=settings.s3_region,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                # Recent boto3 adds CRC checksums to every upload by default; several
+                # S3-compatible services reject them. Only send them when S3 requires it.
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
     def put(self, key: str, data: bytes, content_type: str) -> None:
         self._client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
 
     def get(self, key: str) -> bytes:
-        return self._client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        try:
+            return self._client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        except self._client.exceptions.NoSuchKey:
+            raise FileNotFoundError(key) from None
 
     def url(self, key: str, expires_seconds: int = 900) -> str:
         return self._client.generate_presigned_url(
