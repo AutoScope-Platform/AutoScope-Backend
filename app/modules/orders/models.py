@@ -27,6 +27,21 @@ class CartItem(UUIDPrimaryKey, Timestamps, Base):
     quantity: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class DeliverySettings(UUIDPrimaryKey, Timestamps, Base):
+    """How a parts seller charges for delivery (FR-4.3). One row per seller; a seller
+    without a row delivers free, which is how every order worked before this existed."""
+
+    __tablename__ = "delivery_settings"
+
+    seller_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    same_city_fee_minor: Mapped[int] = mapped_column(BigInteger, default=0)
+    other_city_fee_minor: Mapped[int] = mapped_column(BigInteger, default=0)
+    # Orders from this seller at or above this subtotal deliver free. None = never free.
+    free_over_minor: Mapped[int | None] = mapped_column(BigInteger)
+
+
 class Order(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "orders"
 

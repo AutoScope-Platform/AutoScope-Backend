@@ -47,6 +47,8 @@ class Application(UUIDPrimaryKey, Timestamps, Base):
     terms: Mapped[str | None] = mapped_column(Text)
     offer_valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     decline_reason: Mapped[str | None] = mapped_column(String(300))
+    # Applications sent together to several insurers so the customer can compare (FR-7.2).
+    quote_request_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     # use_alter: applications and policies point at each other, so this constraint is
     # added after both tables exist (otherwise table creation order has no valid answer).
     renewal_of_id: Mapped[uuid.UUID | None] = mapped_column(

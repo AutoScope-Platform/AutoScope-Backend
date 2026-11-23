@@ -27,6 +27,7 @@ from app.modules.haulage.schemas import (
     PresenceOut,
     SosJobOut,
     TrackingOut,
+    VehicleClass,
 )
 from app.modules.identity.deps import CurrentUser, require_admin, require_capability
 from app.modules.identity.models import AccountStatus, User
@@ -44,6 +45,7 @@ def _out(db: Session, job: HaulageJob, tx=None) -> JobOut:
         id=job.id, transaction_id=tx.id, ref=tx.ref, status=tx.status, escrow_status=tx.escrow_status,
         is_sos=job.is_sos, payment_due=tx.payment_due, customer_id=job.customer_id,
         provider_id=job.provider_id, vehicle_description=job.vehicle_description,
+        vehicle_class=job.vehicle_class,
         pickup_address=job.pickup_address, drop_address=job.drop_address,
         distance_km=job.distance_km, fare_minor=job.fare_minor, created_at=job.created_at,
     )  # fmt: skip
@@ -54,7 +56,8 @@ def _out(db: Session, job: HaulageJob, tx=None) -> JobOut:
     "/haulage/estimate",
     response_model=EstimateOut,
     summary="Fare estimate for a tow",
-    description="Distance uses PostGIS (straight line x 1.3). SOS costs 1.5x.",
+    description="Distance uses PostGIS (straight line x 1.3). By vehicle class (FR-6.5): "
+    "motorcycle 0.6x, car 1x, suv 1.25x, van 1.4x, truck 2x. SOS costs 1.5x on top.",
 )
 def estimate(
     pickup_lat: float = Query(ge=-90, le=90),
@@ -62,10 +65,13 @@ def estimate(
     drop_lat: float = Query(ge=-90, le=90),
     drop_lng: float = Query(ge=-180, le=180),
     sos: bool = False,
+    vehicle_class: VehicleClass = "car",
     db: Session = Depends(get_db),
 ) -> EstimateOut:
-    km, fare = service.estimate_fare(db, (pickup_lat, pickup_lng), (drop_lat, drop_lng), sos)
-    return EstimateOut(distance_km=km, fare_minor=fare, sos=sos)
+    km, fare = service.estimate_fare(
+        db, (pickup_lat, pickup_lng), (drop_lat, drop_lng), sos, vehicle_class
+    )
+    return EstimateOut(distance_km=km, fare_minor=fare, sos=sos, vehicle_class=vehicle_class)
 
 
 @router.post(
@@ -83,7 +89,7 @@ def request_job(body: JobIn, user: User = Customer, db: Session = Depends(get_db
         pickup=(body.pickup.latitude, body.pickup.longitude, body.pickup.address),
         drop=(body.drop.latitude, body.drop.longitude, body.drop.address),
         vehicle_id=body.vehicle_id, vehicle_description=body.vehicle_description,
-        notes=body.notes, sos=body.sos,
+        notes=body.notes, sos=body.sos, vehicle_class=body.vehicle_class,
     )  # fmt: skip
     return _out(db, job)
 

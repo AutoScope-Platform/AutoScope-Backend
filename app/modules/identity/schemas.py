@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -264,6 +265,64 @@ class KycOut(BaseModel):
     documents: list[KycDocumentOut]
     submitted_at: datetime | None
     rejection_reason: str | None
+    id_type: str | None = Field(None, description="nin or drivers_license")
+    id_number_last4: str | None = Field(None, description="Only the last 4 digits are kept.")
+    registration_number: str | None = Field(None, examples=["RC1234567"])
+    verified_person_name: str | None = Field(
+        None, description="Name on the government record (shown to admins to compare)."
+    )
+    verified_business_name: str | None = Field(None, description="Company name at CAC.")
+
+
+NIN_PATTERN = re.compile(r"\d{11}")
+LICENCE_PATTERN = re.compile(r"[A-Z0-9]{5,20}")
+CAC_PATTERN = re.compile(r"(RC|BN|IT|LP|LLP)\d{4,10}")
+
+
+class KycDetailsIn(BaseModel):
+    """ID numbers for the automated check. Send these *before* the last document: the
+    check runs when the third document arrives. Both are optional for now; a submission
+    without them goes to the admin with a note that nothing was checked automatically."""
+
+    id_type: Literal["nin", "drivers_license"] | None = Field(
+        None, description="Required with id_number."
+    )
+    id_number: str | None = Field(None, description="11-digit NIN, or driver's licence number.")
+    registration_number: str | None = Field(
+        None,
+        description="CAC number, e.g. RC1234567 (BN for business names). Digits alone are read as RC.",
+    )
+    consent: bool = Field(
+        description="The provider agreed to have these numbers checked against government "
+        "records (NDPR). Must be true when a number is given."
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> KycDetailsIn:
+        if self.id_number is not None:
+            number = re.sub(r"[\s-]", "", self.id_number).upper()
+            if self.id_type is None:
+                raise ValueError("Choose the ID type (nin or drivers_license)")
+            pattern = NIN_PATTERN if self.id_type == "nin" else LICENCE_PATTERN
+            if not pattern.fullmatch(number):
+                raise ValueError(
+                    "A NIN is 11 digits"
+                    if self.id_type == "nin"
+                    else "Enter the licence number as printed (letters and digits)"
+                )
+            self.id_number = number
+        if self.registration_number is not None:
+            number = re.sub(r"[\s-]", "", self.registration_number).upper()
+            if number.isdigit():
+                number = f"RC{number}"
+            if not CAC_PATTERN.fullmatch(number):
+                raise ValueError("Enter the CAC number, e.g. RC1234567")
+            self.registration_number = number
+        if (self.id_number or self.registration_number) and not self.consent:
+            raise ValueError("Consent is needed to check the numbers")
+        if not (self.id_number or self.registration_number):
+            raise ValueError("Give an ID number, a CAC number, or both")
+        return self
 
 
 class KycDecisionIn(BaseModel):

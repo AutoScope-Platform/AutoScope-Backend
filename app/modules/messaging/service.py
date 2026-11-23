@@ -1,25 +1,38 @@
-"""Messaging business logic: threads, messages, attachments and read receipts."""
+"""Messaging business logic: threads, messages, attachments and read receipts.
+
+Threads can be about a listing, a booking or a tow job; for a booking or job the other
+person is worked out from it, and only its two parties can talk about it.
+
+Sending is retry-safe: a message carries an optional `client_id` chosen by the app, and
+sending the same id again returns the first message instead of a duplicate. That lets the
+apps queue messages offline and resend them when the connection is back (FSD 5.5).
+"""
 
 from __future__ import annotations
 
 import uuid
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
 from app.core.errors import BadRequest, NotFound, UnprocessableEntity
 from app.core.events import publish
 from app.core.pagination import paginate_cursor
-from app.core.realtime import Hub
+from app.core.realtime import user_events
 from app.core.uploads import checked_type
 from app.integrations import registry
+from app.modules.booking import service as booking_service
+from app.modules.booking.models import Booking
 from app.modules.catalog.models import Listing
+from app.modules.haulage import service as haulage_service
+from app.modules.haulage.models import HaulageJob
 from app.modules.identity.models import AccountStatus, User
 from app.modules.messaging.models import Message, Thread
 
-# Open chat connections, keyed by user id (see app/core/realtime.py).
-hub = Hub()
+# Each person's open apps, keyed by user id; shared with notifications (core/realtime.py).
+hub = user_events
 
 ATTACHMENT_TYPES = {
     "image/jpeg": ".jpg",
@@ -45,10 +58,47 @@ def _get_thread(db: Session, thread_id: uuid.UUID, user: User) -> Thread:
     return thread
 
 
+def _parties(
+    db: Session, sender: User, booking_id: uuid.UUID | None, job_id: uuid.UUID | None
+) -> set[uuid.UUID] | None:
+    """The two people a booking or job thread is between (None for other threads)."""
+    if booking_id:
+        booking, _ = booking_service.get_booking(db, booking_id, sender)
+        return {booking.customer_id, booking.mechanic_id}
+    if job_id:
+        job, _ = haulage_service.get_job(db, job_id, sender)
+        if job.provider_id is None:
+            raise UnprocessableEntity("No driver has accepted this job yet", code="no_provider")
+        return {job.customer_id, job.provider_id}
+    return None
+
+
 def start_thread(
-    db: Session, sender: User, recipient_id: uuid.UUID, listing_id: uuid.UUID | None, body: str
+    db: Session,
+    sender: User,
+    recipient_id: uuid.UUID | None,
+    listing_id: uuid.UUID | None,
+    body: str,
+    *,
+    booking_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
+    client_id: str | None = None,
 ) -> tuple[Thread, Message]:
-    """Open (or reuse) the conversation with someone about a listing and send the first message."""
+    """Open (or reuse) the conversation with someone and send the first message.
+
+    About a booking or job, the recipient may be left out: it is the other party.
+    """
+    if sum(x is not None for x in (listing_id, booking_id, job_id)) > 1:
+        raise BadRequest("Link a conversation to one listing, booking or job", code="one_subject")
+    parties = _parties(db, sender, booking_id, job_id)
+    if parties is not None:
+        if sender.id not in parties:
+            raise UnprocessableEntity("Only its two parties can chat about it", code="not_a_party")
+        recipient_id = recipient_id or next(iter(parties - {sender.id}), None)
+        if recipient_id not in parties:
+            raise UnprocessableEntity("Only its two parties can chat about it", code="not_a_party")
+    if recipient_id is None:
+        raise BadRequest("Choose who to message", code="recipient_required")
     if recipient_id == sender.id:
         raise UnprocessableEntity("You cannot message yourself", code="self_message")
     recipient = db.get(User, recipient_id)
@@ -61,15 +111,31 @@ def start_thread(
         select(Thread).where(
             Thread.user_low_id == low,
             Thread.user_high_id == high,
-            Thread.listing_id.is_(None) if listing_id is None else Thread.listing_id == listing_id,
+            *_subject_filter(listing_id, booking_id, job_id),
         )
     )
     if thread is None:
-        thread = Thread(user_low_id=low, user_high_id=high, listing_id=listing_id)
+        thread = Thread(
+            user_low_id=low, user_high_id=high, listing_id=listing_id, booking_id=booking_id,
+            job_id=job_id,
+        )  # fmt: skip
         db.add(thread)
         db.flush()
-    message = _add_message(db, thread, sender, body=body)
+    message = _add_message(db, thread, sender, body=body, client_id=client_id)
     return thread, message
+
+
+def _subject_filter(
+    listing_id: uuid.UUID | None, booking_id: uuid.UUID | None, job_id: uuid.UUID | None
+) -> list:
+    def same(column, value):
+        return column.is_(None) if value is None else column == value
+
+    return [
+        same(Thread.listing_id, listing_id),
+        same(Thread.booking_id, booking_id),
+        same(Thread.job_id, job_id),
+    ]
 
 
 def _add_message(
@@ -79,18 +145,32 @@ def _add_message(
     *,
     body: str,
     attachment: tuple[str, str, str] | None = None,
+    client_id: str | None = None,
 ) -> Message:
-    """Store the message, update the thread preview, commit, then notify. (key, name, type)"""
+    """Store the message, update the thread preview, commit, then notify. (key, name, type)
+
+    With a `client_id` already used by this sender, the earlier message is returned and
+    nothing is stored, pushed or notified again.
+    """
+    if client_id and (earlier := _by_client_id(db, sender, client_id)):
+        return earlier
     body = body.strip()
     if not body and attachment is None:
         raise BadRequest("A message cannot be empty", code="empty_message")
-    message = Message(thread_id=thread.id, sender_id=sender.id, body=body)
+    message = Message(thread_id=thread.id, sender_id=sender.id, body=body, client_id=client_id)
     if attachment:
         message.attachment_key, message.attachment_name, message.attachment_type = attachment
     db.add(message)
     thread.last_message_at = utcnow()
     thread.last_message_preview = (body or f"📎 {attachment[1]}")[:120]
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The same retry arrived twice at once and the other request stored it first.
+        db.rollback()
+        if client_id and (earlier := _by_client_id(db, sender, client_id)):
+            return earlier
+        raise
     recipient_id = other_party(thread, sender.id)
     payload = message_payload(message)
     hub.broadcast(recipient_id, payload)
@@ -103,8 +183,18 @@ def _add_message(
     return message
 
 
-def send_message(db: Session, sender: User, thread_id: uuid.UUID, body: str) -> Message:
-    return _add_message(db, _get_thread(db, thread_id, sender), sender, body=body)
+def _by_client_id(db: Session, sender: User, client_id: str) -> Message | None:
+    return db.scalar(
+        select(Message).where(Message.sender_id == sender.id, Message.client_id == client_id)
+    )
+
+
+def send_message(
+    db: Session, sender: User, thread_id: uuid.UUID, body: str, client_id: str | None = None
+) -> Message:
+    return _add_message(
+        db, _get_thread(db, thread_id, sender), sender, body=body, client_id=client_id
+    )
 
 
 def send_attachment(
@@ -115,8 +205,11 @@ def send_attachment(
     content_type: str,
     data: bytes,
     caption: str,
+    client_id: str | None = None,
 ) -> Message:
     thread = _get_thread(db, thread_id, sender)
+    if client_id and (earlier := _by_client_id(db, sender, client_id)):
+        return earlier  # do not store the file twice
     content_type = checked_type(
         data, ATTACHMENT_TYPES, message="Send a JPEG, PNG, WebP or PDF", code="invalid_file_type"
     )
@@ -125,8 +218,9 @@ def send_attachment(
     key = f"chat/{thread.id}/{uuid.uuid4().hex}{ATTACHMENT_TYPES[content_type]}"
     registry.get_storage().put(key, data, content_type)
     return _add_message(
-        db, thread, sender, body=caption, attachment=(key, filename[:200], content_type)
-    )
+        db, thread, sender, body=caption, attachment=(key, filename[:200], content_type),
+        client_id=client_id,
+    )  # fmt: skip
 
 
 def message_payload(message: Message) -> dict:
@@ -136,6 +230,7 @@ def message_payload(message: Message) -> dict:
         "id": str(message.id),
         "thread_id": str(message.thread_id),
         "sender_id": str(message.sender_id),
+        "client_id": message.client_id,
         "body": message.body,
         "attachment_name": message.attachment_name,
         "attachment_url": attachment_url(message),
@@ -179,10 +274,24 @@ def mark_read(db: Session, user: User, thread_id: uuid.UUID) -> int:
 
 
 def list_threads(
-    db: Session, user: User, *, limit: int, cursor: str | None
+    db: Session,
+    user: User,
+    *,
+    limit: int,
+    cursor: str | None,
+    listing_id: uuid.UUID | None = None,
+    booking_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
 ) -> tuple[list[dict], str | None]:
-    """My conversations, most recent first, with the other person and unread count."""
+    """My conversations, most recent first, with the other person and unread count.
+
+    Filter by subject to find the existing chat for a listing, booking or job."""
     stmt = select(Thread).where(or_(Thread.user_low_id == user.id, Thread.user_high_id == user.id))
+    for column, value in (
+        (Thread.listing_id, listing_id), (Thread.booking_id, booking_id), (Thread.job_id, job_id)
+    ):  # fmt: skip
+        if value is not None:
+            stmt = stmt.where(column == value)
     threads, next_cursor = paginate_cursor(db, stmt, Thread, limit=limit, cursor=cursor)
     if not threads:
         return [], next_cursor
@@ -205,12 +314,27 @@ def list_threads(
             select(Listing).where(Listing.id.in_([t.listing_id for t in threads if t.listing_id]))
         )
     }
+    bookings = {
+        b.id: b.service_title
+        for b in db.scalars(
+            select(Booking).where(Booking.id.in_([t.booking_id for t in threads if t.booking_id]))
+        )
+    }
+    jobs = {
+        j.id: f"Tow to {j.drop_address}"
+        for j in db.scalars(
+            select(HaulageJob).where(HaulageJob.id.in_([t.job_id for t in threads if t.job_id]))
+        )
+    }
     return [
         {
             "thread": t,
             "other": names.get(others[t.id]),
             "unread": unread.get(t.id, 0),
             "listing_title": titles.get(t.listing_id),
+            "subject_title": titles.get(t.listing_id)
+            or bookings.get(t.booking_id)
+            or jobs.get(t.job_id),
         }
         for t in threads
     ], next_cursor

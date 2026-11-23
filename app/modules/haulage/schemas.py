@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -16,10 +17,14 @@ class PlaceIn(BaseModel):
     address: str = Field("", max_length=300, examples=["Third Mainland Bridge, Lagos"])
 
 
+VehicleClass = Literal["motorcycle", "car", "suv", "van", "truck"]
+
+
 class EstimateOut(BaseModel):
     distance_km: float
     fare_minor: int
     sos: bool
+    vehicle_class: VehicleClass = "car"
 
 
 class JobIn(BaseModel):
@@ -29,6 +34,10 @@ class JobIn(BaseModel):
     vehicle_description: str = Field("", max_length=200, examples=["Black Toyota Corolla 2014"])
     notes: str | None = Field(None, max_length=500)
     sos: bool = Field(False, description="Emergency: priority dispatch at a higher fare.")
+    vehicle_class: VehicleClass = Field(
+        "car",
+        description="motorcycle, car, suv, van (incl. pick-ups, minibuses) or truck (incl. buses).",
+    )
 
 
 class JobOut(BaseModel):
@@ -42,6 +51,7 @@ class JobOut(BaseModel):
     customer_id: uuid.UUID
     provider_id: uuid.UUID | None
     vehicle_description: str
+    vehicle_class: VehicleClass = "car"
     pickup_address: str
     drop_address: str
     distance_km: float

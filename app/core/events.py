@@ -59,3 +59,33 @@ def publish(name: str, **payload: Any) -> None:
             handler(event)
         except Exception:  # noqa: BLE001 - one bad subscriber must not break the others
             logger.exception("Event handler %s failed for %s", handler.__name__, name)
+
+
+_AFTER_COMMIT_KEY = "events_after_commit"
+
+
+def publish_after_commit(session, name: str, **payload: Any) -> None:
+    """Publish `name` once `session` commits; drop it if the session rolls back.
+
+    For code that cannot commit itself (e.g. inside `run_idempotent`), so a subscriber never
+    sees data that is later rolled back.
+    """
+    from sqlalchemy import event as sa_event  # noqa: PLC0415
+
+    # Make sure a transaction is open: rolling back a session that has not begun one does
+    # nothing and fires no event, which would leave the queued event to a later commit.
+    session.connection()
+    queue = session.info.get(_AFTER_COMMIT_KEY)
+    if queue is None:
+        queue = session.info[_AFTER_COMMIT_KEY] = []
+
+        def send(sess) -> None:
+            for event_name, event_payload in sess.info.pop(_AFTER_COMMIT_KEY, []):
+                publish(event_name, **event_payload)
+
+        def drop(sess, _previous_transaction=None) -> None:  # (session, transaction)
+            sess.info.pop(_AFTER_COMMIT_KEY, None)
+
+        sa_event.listen(session, "after_commit", send, once=True)
+        sa_event.listen(session, "after_soft_rollback", drop, once=True)
+    queue.append((name, payload))
