@@ -7,7 +7,7 @@ refused when `ENV=production`.
 | Service | Variable to switch | Real driver | Keys you must provide | Status |
 | --- | --- | --- | --- | --- |
 | Payments | `PAYMENT_DRIVER=paystack` | Paystack | `PAYSTACK_SECRET_KEY`, `PAYSTACK_PUBLIC_KEY` (start with *test* keys); set the webhook URL in the Paystack dashboard to `https://<api>/api/v1/payments/webhooks/paystack` | Written, **not tested against live Paystack** |
-| SMS (OTP, alerts) | `SMS_DRIVER=termii` | Termii | `TERMII_API_KEY`, `TERMII_SENDER_ID` (sender IDs need approval in Nigeria: apply early) | Written, untested live |
+| SMS (OTP, alerts) | `SMS_DRIVER=termii` | Termii | `TERMII_API_KEY`, `TERMII_SENDER_ID` (sender IDs need approval in Nigeria: apply early), `TERMII_BASE_URL` (each account has its own API address, shown on the Termii dashboard: currently `https://v4.api.termii.com`). OTPs use the `dnd` route (`TERMII_CHANNEL=dnd`, the default), which Termii support must switch on for the account; `generic` does not reach numbers on Do-Not-Disturb | Written, untested live |
 | E-mail | `EMAIL_DRIVER=smtp` | any SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM` | Written, untested live |
 | Push | `PUSH_DRIVER=fcm` | Firebase Cloud Messaging | `FCM_SERVICE_ACCOUNT_JSON` (the service-account JSON, as one line) | Written, untested live |
 | File storage (staging) | `STORAGE_DRIVER=s3` | Neon Object Storage (beta), or any S3-compatible service (Cloudflare R2, AWS S3) | `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`. Neon: see "Neon Object Storage" below | Driver set up for Neon (path-style, SigV4) and tested offline, **not yet against a real bucket** |
