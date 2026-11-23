@@ -15,6 +15,7 @@ from app.modules.identity.models import (
     KycDocType,
     KycStatus,
     KycSubmissionStatus,
+    SocialProvider,
 )
 
 PASSWORD_HELP = "At least 8 characters with at least one letter and one number."
@@ -27,6 +28,15 @@ def check_password_strength(value: str) -> str:
     if len(value) > 128:
         raise ValueError("Password is too long")
     return value
+
+
+def check_signup_roles(roles: list[Role]) -> list[Role]:
+    """Shared by e-mail/phone and social sign-up: self-service roles only, no duplicates."""
+    if not roles:
+        raise ValueError("Choose at least one role")
+    if any(r not in SELF_SERVICE_ROLES for r in roles):
+        raise ValueError("That role cannot be chosen at sign-up")
+    return list(dict.fromkeys(roles))  # de-duplicate, keep order
 
 
 class RegisterIn(BaseModel):
@@ -56,11 +66,7 @@ class RegisterIn(BaseModel):
     @field_validator("roles")
     @classmethod
     def _roles_allowed(cls, roles: list[Role]) -> list[Role]:
-        if not roles:
-            raise ValueError("Choose at least one role")
-        if any(r not in SELF_SERVICE_ROLES for r in roles):
-            raise ValueError("That role cannot be chosen at sign-up")
-        return list(dict.fromkeys(roles))  # de-duplicate, keep order
+        return check_signup_roles(roles)
 
     @model_validator(mode="after")
     def _contact_and_terms(self) -> RegisterIn:
@@ -98,6 +104,55 @@ class LoginIn(BaseModel):
 class LoginVerifyIn(BaseModel):
     challenge_token: str = Field(description="From the login response when `requires_otp` is true.")
     code: str = Field(min_length=4, max_length=8)
+
+
+class LoginResendIn(BaseModel):
+    challenge_token: str = Field(description="From the login response when `requires_otp` is true.")
+
+
+class SocialLoginIn(BaseModel):
+    """Sign in (or sign up) with Google or Apple (FR-1.2).
+
+    Send the provider's **ID token**. For a returning user that is all. The first time,
+    the API answers `422 signup_details_required`; show the sign-up form (role, terms,
+    business name for business roles) and send the same token again with those fields.
+    """
+
+    provider: SocialProvider
+    id_token: str = Field(min_length=5, max_length=10_000)
+    nonce: str | None = Field(
+        None, max_length=200, description="The raw nonce the app used, if it used one."
+    )
+    full_name: str | None = Field(
+        None,
+        min_length=2,
+        max_length=120,
+        description="Apple gives the name to the app only on the first sign-in: pass it here.",
+    )
+    roles: list[Role] = Field(default=[Role.VEHICLE_OWNER], description="New accounts only.")
+    business_name: str | None = Field(None, max_length=160, description="New business accounts.")
+    city: str | None = Field(None, max_length=80)
+    accept_terms: bool = Field(False, description="Must be true when the account is created.")
+    remember_me: bool = True
+
+    @field_validator("roles")
+    @classmethod
+    def _roles_allowed(cls, roles: list[Role]) -> list[Role]:
+        return check_signup_roles(roles)
+
+
+class EraseIn(BaseModel):
+    """Confirm account deletion with the password, or with a code from
+    `POST /me/erase/code` (accounts created with Google/Apple have no password)."""
+
+    password: str | None = None
+    code: str | None = Field(None, min_length=4, max_length=8)
+
+    @model_validator(mode="after")
+    def _one_proof(self) -> EraseIn:
+        if not self.password and not self.code:
+            raise ValueError("Confirm with your password or a code")
+        return self
 
 
 class RefreshIn(BaseModel):
@@ -156,6 +211,9 @@ class UserOut(BaseModel):
     status: AccountStatus
     kyc_status: KycStatus
     two_factor_enabled: bool
+    has_password: bool = Field(
+        True, description="False for Google/Apple accounts until they set one via reset."
+    )
     created_at: datetime
     last_active_at: datetime | None
 

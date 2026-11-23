@@ -11,7 +11,7 @@ from app.core.db import get_db
 from app.core.errors import error_responses
 from app.core.idempotency import run_idempotent
 from app.core.permissions import Capability
-from app.modules.identity.deps import CurrentUser, require_capability
+from app.modules.identity.deps import CurrentUser, require_capability, user_rate_limit
 from app.modules.identity.models import User
 from app.modules.orders import service
 from app.modules.orders.models import Order
@@ -89,7 +89,8 @@ def clear_cart(user: User = BuyerUser, db: Session = Depends(get_db)) -> None:
     summary="Turn the cart into orders (one per seller)",
     description="Requires an `Idempotency-Key` header. Each order then needs paying with "
     "`POST /payments` using its `transaction_id`.",
-    responses=error_responses(400, 422),
+    responses=error_responses(400, 422, 429),
+    dependencies=[Depends(user_rate_limit("checkout", 10, 60))],
 )
 def do_checkout(
     body: CheckoutIn,
@@ -114,7 +115,8 @@ def do_checkout(
     response_model=OrderOut,
     status_code=status.HTTP_201_CREATED,
     summary="Buy a vehicle (at list price or an accepted offer)",
-    responses=error_responses(404, 422),
+    responses=error_responses(404, 422, 429),
+    dependencies=[Depends(user_rate_limit("vehicle-purchase", 10, 60))],
 )
 def purchase_vehicle(
     listing_id: uuid.UUID,

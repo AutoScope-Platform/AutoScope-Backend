@@ -17,7 +17,12 @@ from app.core.errors import Forbidden, error_responses
 from app.core.idempotency import run_idempotent
 from app.core.permissions import ADMIN_ROLES
 from app.core.ratelimit import client_ip
-from app.modules.identity.deps import CurrentUser, require_admin, require_super_admin
+from app.modules.identity.deps import (
+    CurrentUser,
+    require_admin,
+    require_super_admin,
+    user_rate_limit,
+)
 from app.modules.identity.models import User
 from app.modules.payments import service
 from app.modules.payments.models import (
@@ -64,7 +69,8 @@ router = APIRouter(tags=["Payments"])
     summary="Start paying for a transaction",
     description="Returns the gateway's hosted checkout URL. Requires an `Idempotency-Key` "
     "header so a retry never creates a second payment.",
-    responses=error_responses(400, 403, 409, 422),
+    responses=error_responses(400, 403, 409, 422, 429),
+    dependencies=[Depends(user_rate_limit("pay", 10, 60))],
 )
 def pay(
     body: PayIn,
@@ -86,7 +92,8 @@ def pay(
     response_model=VerifyOut,
     summary="Confirm a payment after checkout",
     description="Call when the hosted checkout closes. Safe to call repeatedly.",
-    responses=error_responses(404, 422),
+    responses=error_responses(404, 422, 429),
+    dependencies=[Depends(user_rate_limit("pay-verify", 30, 60))],
 )
 def verify(reference: str, user: CurrentUser, db: Session = Depends(get_db)) -> VerifyOut:
     tx = service.confirm_payment(db, reference)
