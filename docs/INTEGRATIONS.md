@@ -14,13 +14,14 @@ refused when `ENV=production`.
 | File storage (Azure) | `STORAGE_DRIVER=azure` | Azure Blob Storage | `AZURE_STORAGE_CONNECTION_STRING` (with AccountKey), `AZURE_STORAGE_CONTAINER` | Written and tested against the Azure SDK offline (signed links, upload/download/delete with a stand-in client), **not yet against a real storage account**. Setup: docs/AZURE.md |
 | VIN decoding | `VIN_DRIVER=nhtsa` | NHTSA vPIC (free, no key) | none | Written |
 | Google / Apple sign-in | `SOCIAL_DRIVER=live` | Google ID tokens (google-auth), Apple ID tokens (Apple's public keys) | `GOOGLE_CLIENT_IDS`: the iOS, Android and web OAuth client ids, comma-separated. They live in the Google Cloud project behind the Firebase project (Firebase console: Authentication, enable Google; then Google Cloud console: APIs & Services, Credentials). The OAuth consent screen needs the app name, logo, support e-mail and a privacy policy link. `APPLE_CLIENT_IDS`: the iOS bundle id (add the Services id if web sign-in is added); needs an Apple Developer account. No secrets: we only verify tokens | Written and unit-tested with signed test tokens, **not yet tried with real Google/Apple accounts** |
-| KYC / ID check | `KYC_DRIVER=youverify` | **Youverify** (chosen by the client; earlier Dojah) | Youverify API key from the dashboard (sandbox first) | Mock only: **the Youverify driver still has to be written** |
+| KYC / ID check | `KYC_DRIVER=youverify` | **Youverify** (chosen by the client) | `YOUVERIFY_API_KEY` (dashboard: API & Webhooks, create one in Sandbox mode first), `YOUVERIFY_BASE_URL` (sandbox by default; live: `https://api.youverify.co`, production refuses the sandbox) | Written: NIN / driver's licence and CAC number lookups with name matching, tested offline, **not yet against the Youverify sandbox**. Youverify cannot check document photos from the backend, so the uploaded documents go to the admin and the numbers given in `PUT /me/kyc-details` are checked. Sandbox test numbers: NIN `12345678901`, licence `ABC1234567890` |
 | Maps / geocoding | not needed yet | | Distances use PostGIS; add Google/Mapbox only if the client wants address autocomplete or road routing | n/a |
 
 ## Mock behaviour (for demos and tests)
 - OTP code is always `123456` (`MOCK_OTP_CODE`).
 - Mock payment "charges" instantly; webhooks are signed with a fixed demo secret.
-- Mock KYC passes unless the uploaded file name contains `blurred` or `address`.
+- Mock KYC passes unless the uploaded file name contains `blurred` or `address`. An ID number
+  starting with `000` and the CAC number `RC0000000` come back "not found".
 - Mock social sign-in accepts any `id_token` shaped `mock:<subject>:<email>:<name>` (e.g.
   `mock:g-1:ada@gmail.com:Ada Obi`), so the apps can build the Google/Apple screens before the
   real client ids exist.

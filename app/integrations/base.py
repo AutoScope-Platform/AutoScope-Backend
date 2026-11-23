@@ -103,13 +103,23 @@ class PaymentGateway(Protocol):
 class KycCheckResult:
     passed: bool
     reason: str | None = None  # shown to admins, e.g. "Licence image is blurred"
+    name: str | None = None  # the name on the government record, when one was found
 
 
 class KycProvider(Protocol):
+    """Automated checks run before a human reviews the submission (FR-1.4, FR-13.1).
+    A failed check flags the submission for the admin; it never rejects on its own."""
+
     def check_document(
         self, *, doc_type: str, storage_key: str, filename: str, full_name: str
     ) -> KycCheckResult:
-        """Automated ID check run before a human reviews the submission (FR-13.1)."""
+        """Check an uploaded document image (providers that cannot do this pass it)."""
+
+    def verify_person(self, *, id_type: str, id_number: str, full_name: str) -> KycCheckResult:
+        """Look up a NIN or driver's licence and compare the name with the account's."""
+
+    def verify_business(self, *, registration_number: str, business_name: str) -> KycCheckResult:
+        """Look up a CAC registration number and compare the company name."""
 
 
 # --- Social sign-in (Google / Apple) ------------------------------------------------
