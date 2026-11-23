@@ -7,6 +7,39 @@ production) with the Azure CLI, then lets GitHub Actions deploy it on every merg
 > real subscription**. Run them step by step, and check each step worked before the next.
 > Needs: `az` 2.60+ with `az extension add --name containerapp --upgrade`.
 
+## The quick way: one script
+
+`scripts/azure_setup.sh` runs steps 1 to 10 below in order, skips anything that already exists
+(so it can simply be re-run after a failure), keeps every secret in Key Vault without printing
+it, waits for the migrations, and checks the API answers at the end:
+
+```bash
+az login
+CHECK_ONLY=1 bash scripts/azure_setup.sh     # access checks only; creates nothing
+SEED=1 GITHUB_DEPLOY=1 bash scripts/azure_setup.sh
+```
+
+Settings come from the environment (`ENVNAME`, `LOC`, `SUFFIX` for names that are taken, and so
+on; see the top of the script). It has been dry-run against a stand-in for the Azure CLI, not yet
+against a real subscription.
+
+## Access needed
+
+Ask the subscription owner for:
+
+1. **Owner on the resource group** (e.g. `autoscope-staging`), or **Contributor plus Role Based
+   Access Control Administrator**. Contributor alone is not enough: steps 3, 8 and 10 give the
+   apps and GitHub their permissions, and only those roles can grant permissions.
+2. **These Azure services switched on** for the subscription (resource providers):
+   `Microsoft.App`, `Microsoft.ContainerRegistry`, `Microsoft.DBforPostgreSQL`, `Microsoft.Cache`,
+   `Microsoft.Storage`, `Microsoft.KeyVault`, `Microsoft.OperationalInsights`, `Microsoft.Insights`,
+   `Microsoft.ManagedIdentity`. The script switches them on itself if the account is allowed to.
+3. For automatic deploys from GitHub (step 10): permission to **create an app registration** in
+   Microsoft Entra ID (on by default for members in most tenants; otherwise the
+   "Application Developer" role).
+
+The script's `CHECK_ONLY=1` run tells you which of these is missing before anything is created.
+
 ## What gets created
 
 | Piece | Azure service | Notes |
