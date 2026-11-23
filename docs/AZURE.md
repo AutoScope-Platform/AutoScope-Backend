@@ -28,6 +28,7 @@ globally unique). Example for staging:
 
 ```bash
 ENVNAME=staging
+GITHUB_REPO=Paralexapp/AutoScope-Backend   # owner/name exactly as on GitHub: Azure only trusts deploys from it
 LOC=southafricanorth            # or westeurope; check latency from Lagos and NDPA data rules
 RG=autoscope-$ENVNAME
 LAW=autoscope-$ENVNAME-logs
@@ -208,7 +209,7 @@ az role assignment create --assignee-object-id $SP_ID --assignee-principal-type 
 az ad app federated-credential create --id $APP_ID --parameters '{
   "name": "github-'$ENVNAME'",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:Great-NGO/Autoscope-Backend:environment:'$ENVNAME'",
+  "subject": "repo:'$GITHUB_REPO':environment:'$ENVNAME'",
   "audiences": ["api://AzureADTokenExchange"]
 }'
 ```
