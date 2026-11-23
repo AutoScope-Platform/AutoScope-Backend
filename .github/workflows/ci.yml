@@ -2,6 +2,7 @@ name: CI
 on:
   push: { branches: [main, develop] }
   pull_request:
+  workflow_call:  # the Azure deploy runs the same checks first
 
 jobs:
   test:

@@ -187,6 +187,9 @@ class PayoutSettingsOut(_Orm):
     payout_weekday: int = Field(description="0 = Monday ... 6 = Sunday.")
     hold_days: int
     min_payout_minor: int
+    max_cancel_fee_bps: int = Field(
+        description="Highest late-cancellation fee a provider may set (5000 = 50%)."
+    )
 
 
 class PayoutSettingsIn(BaseModel):
@@ -194,6 +197,53 @@ class PayoutSettingsIn(BaseModel):
     payout_weekday: int = Field(ge=0, le=6)
     hold_days: int = Field(ge=0, le=60)
     min_payout_minor: int = Field(ge=0)
+    max_cancel_fee_bps: int | None = Field(
+        None, ge=0, le=10_000, description="Leave out to keep the current cap."
+    )
+
+
+class CancellationPolicyIn(BaseModel):
+    free_cancel_hours: int = Field(
+        0, ge=0, le=720, description="Bookings: customers cancel free until this long before."
+    )
+    late_cancel_fee_bps: int = Field(
+        0, ge=0, le=10_000, description="Bookings: share kept after that (2000 = 20%)."
+    )
+    order_cancel_window_hours: int | None = Field(
+        None,
+        ge=1,
+        le=720,
+        description="Parts: buyers may cancel this long after paying. Null = until it ships.",
+    )
+
+
+class CancellationPolicyOut(CancellationPolicyIn):
+    max_late_cancel_fee_bps: int = Field(description="The platform's cap, for the form.")
+
+
+class ReceiptLineOut(BaseModel):
+    description: str
+    amount_minor: int
+
+
+class ReceiptOut(BaseModel):
+    receipt_number: str = Field(examples=["RCT-80312"])
+    ref: str
+    kind: TransactionKind
+    description: str
+    issued_at: datetime
+    customer_name: str
+    provider_name: str | None
+    lines: list[ReceiptLineOut]
+    total_minor: int
+    refunded_minor: int
+    net_paid_minor: int
+    currency: str
+    payment_method: PaymentMethod | None
+    payment_reference: str | None
+    status: TxStatus
+    escrow_status: EscrowStatus
+    print_url: str = Field(description="Printable HTML version (Print / Save as PDF).")
 
 
 class PayoutOut(_Orm):

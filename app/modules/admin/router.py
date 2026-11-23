@@ -19,7 +19,15 @@ from app.core.errors import error_responses
 from app.core.permissions import Capability, Role
 from app.core.ratelimit import client_ip
 from app.modules.admin import service
-from app.modules.admin.schemas import AnalyticsOut, AuditPage, OverviewOut
+from app.modules.admin.schemas import (
+    AnalyticsOut,
+    AuditPage,
+    OverviewOut,
+    RemoveUserIn,
+    RiskFlagOut,
+    RiskFlagPage,
+    RiskSignalsOut,
+)
 from app.modules.identity import service as identity
 from app.modules.identity.deps import require_admin, require_capability, require_super_admin
 from app.modules.identity.models import AccountStatus, KycSubmissionStatus, User
@@ -202,6 +210,46 @@ def grant_staff(
     admin: User = Depends(require_super_admin), db: Session = Depends(get_db),
 ):  # fmt: skip
     return identity.grant_staff_role(db, user_id, role, admin=admin, ip=client_ip(request))
+
+
+@router.post(
+    "/admin/users/{user_id}/remove",
+    status_code=204,
+    summary="Remove an account for breaking the rules (Super admin)",
+    description="FR-13.2. Anonymises the account like a self-service deletion (transaction "
+    "records are kept), signs it out everywhere and takes its pending and live listings down. "
+    "Cannot be undone. Staff accounts must lose their staff role first.",
+    responses=error_responses(403, 404, 409),
+)
+def remove_user(
+    user_id: uuid.UUID, body: RemoveUserIn, request: Request,
+    admin: User = Depends(require_super_admin), db: Session = Depends(get_db),
+):  # fmt: skip
+    identity.remove_user(db, user_id, admin=admin, reason=body.reason, ip=client_ip(request))
+    return Response(status_code=204)
+
+
+@router.get(
+    "/admin/risk-flags",
+    response_model=RiskFlagPage,
+    summary="Repeat offenders: accounts with repeated problems",
+    description="Listings rejected or taken down, fraud signals, upheld reports and disputes "
+    "refunded to the buyer, weighted; an account with a score of 3 or more is listed, worst "
+    "first. Review them and suspend or remove as needed.",
+    dependencies=[Depends(require_admin)],
+)
+def risk_flags(days: int = Query(90, ge=7, le=365), db: Session = Depends(get_db)) -> RiskFlagPage:
+    return RiskFlagPage(
+        days=days,
+        items=[
+            RiskFlagOut(
+                user_id=r["user"].id, ref=r["user"].ref, name=r["user"].display_name,
+                status=r["user"].status.value, score=r["score"],
+                signals=RiskSignalsOut(**r["signals"]), reasons=r["reasons"],
+            )
+            for r in service.risk_flags(db, days=days)
+        ],
+    )  # fmt: skip
 
 
 # --- Audit log ---------------------------------------------------------------------------

@@ -101,8 +101,8 @@ def get_engine() -> Engine:
         _engine = create_engine(
             settings.database_url_sync,
             pool_pre_ping=True,  # survives Neon scale-to-zero and dropped connections
-            pool_size=10,
-            max_overflow=20,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
         )
         _session_factory = sessionmaker(_engine, expire_on_commit=False)
     return _engine

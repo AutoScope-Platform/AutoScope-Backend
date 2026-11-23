@@ -9,12 +9,14 @@ from app.core.audit import AuditLog
 from app.core.config import get_settings
 from app.core.permissions import Role
 from app.core.ratelimit import reset_counters
-from app.integrations import mock
+from app.integrations import mock, registry
+from app.integrations.base import IntegrationError
 from app.modules.identity import service
 from app.modules.identity.models import (
     IdCheckStatus,
     KycDocType,
     KycStatus,
+    KycSubmission,
     KycSubmissionStatus,
     User,
 )
@@ -376,6 +378,97 @@ def test_flagged_document_is_reported_to_reviewers(client, db):
     r = upload(client, garage, KycDocType.LICENCE, filename="licence-blurred.jpg")
     assert r.json()["id_check_status"] == IdCheckStatus.FLAGGED
     assert r.json()["id_check_reason"] == "Licence image is blurred"
+
+
+def set_details(client, user, **body):
+    return client.put(
+        "/api/v1/me/kyc-details", headers=auth_headers(user), json={"consent": True, **body}
+    )
+
+
+def upload_all(client, user):
+    upload(client, user, KycDocType.GOVERNMENT_ID)
+    upload(client, user, KycDocType.BUSINESS_REGISTRATION)
+    return upload(client, user, KycDocType.LICENCE)
+
+
+def test_id_and_cac_numbers_are_checked_when_submitted(client, db):
+    garage = make_user(db, Role.MECHANIC, name="Adaora Okafor", business_name="Okafor Motors")
+    r = set_details(
+        client, garage, id_type="nin", id_number="1234 5678 901", registration_number="1234567"
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["id_number_last4"] == "8901" and r.json()["registration_number"] == "RC1234567"
+
+    body = upload_all(client, garage).json()
+    assert body["status"] == "pending" and body["id_check_status"] == "passed"
+    assert body["id_check_reason"] is None
+    assert body["verified_person_name"] == "Adaora Okafor"
+    assert body["verified_business_name"] == "Okafor Motors"
+
+    # Only the last 4 digits of the NIN are kept once checked.
+    submission = db.scalar(select(KycSubmission).where(KycSubmission.user_id == garage.id))
+    assert submission.id_number is None and submission.id_number_last4 == "8901"
+    # Numbers cannot change while under review.
+    assert set_details(client, garage, registration_number="RC7654321").status_code == 409
+
+
+def test_unknown_numbers_flag_the_submission(client, db):
+    garage = make_user(db, Role.DEALER)
+    set_details(
+        client, garage, id_type="nin", id_number="00012345678", registration_number="RC0000000"
+    )
+    body = upload_all(client, garage).json()
+    assert body["id_check_status"] == "flagged"
+    assert body["id_check_reason"] == "NIN not found; CAC number not found"
+
+
+def test_without_numbers_the_admin_is_told_to_check_by_hand(client, db):
+    garage = make_user(db, Role.HAULAGE_PROVIDER)
+    body = upload_all(client, garage).json()
+    assert body["id_check_status"] == "passed"
+    assert body["id_check_reason"] == (
+        "No ID number or CAC number given: check the documents by hand"
+    )
+
+
+def test_unavailable_id_service_flags_for_a_manual_check(client, db):
+    class DownKyc(mock.MockKyc):
+        def verify_person(self, **kwargs):
+            raise IntegrationError("Youverify could not run the check (503)")
+
+    registry.override("kyc", DownKyc())
+    try:
+        garage = make_user(db, Role.MECHANIC)
+        set_details(client, garage, id_type="nin", id_number="12345678901")
+        body = upload_all(client, garage).json()
+    finally:
+        registry.override("kyc", None)
+    assert body["status"] == "pending" and body["id_check_status"] == "flagged"
+    assert body["id_check_reason"].startswith("Automated check unavailable, check by hand")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"id_type": "nin", "id_number": "12345"},  # a NIN is 11 digits
+        {"id_number": "12345678901"},  # no ID type
+        {"registration_number": "hello"},
+        {"id_type": "nin", "id_number": "12345678901", "consent": False},
+        {},
+    ],
+)
+def test_kyc_details_validation(client, db, body):
+    garage = make_user(db, Role.MECHANIC)
+    r = client.put(
+        "/api/v1/me/kyc-details", headers=auth_headers(garage), json={"consent": True, **body}
+    )
+    assert r.status_code == 422
+
+
+def test_owners_do_not_give_kyc_details(client, db):
+    owner = make_user(db)
+    assert set_details(client, owner, registration_number="RC1234567").status_code == 403
 
 
 def test_kyc_upload_rules(client, db):

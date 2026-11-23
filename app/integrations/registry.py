@@ -97,8 +97,15 @@ def get_payments() -> PaymentGateway:
 
 
 def get_kyc() -> KycProvider:
-    # Only the mock exists until a vendor (Smile ID, Dojah...) is chosen. See docs/INTEGRATIONS.md.
-    return _cached("kyc", mock.MockKyc)
+    def build() -> KycProvider:
+        s = get_settings()
+        if s.kyc_driver == "youverify":
+            from app.integrations.youverify import YouverifyKyc
+
+            return YouverifyKyc(s)
+        return mock.MockKyc()
+
+    return _cached("kyc", build)
 
 
 def get_storage() -> StorageProvider:
@@ -108,6 +115,10 @@ def get_storage() -> StorageProvider:
             from app.integrations.storage import S3Storage
 
             return S3Storage(s)
+        if s.storage_driver == "azure":
+            from app.integrations.storage import AzureBlobStorage
+
+            return AzureBlobStorage(s)
         from app.integrations.storage import LocalStorage
 
         return LocalStorage(s.local_storage_dir, s.jwt_secret)

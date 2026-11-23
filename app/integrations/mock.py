@@ -140,6 +140,20 @@ class MockKyc:
             return KycCheckResult(False, "Address could not be verified")
         return KycCheckResult(True)
 
+    def verify_person(self, *, id_type: str, id_number: str, full_name: str) -> KycCheckResult:
+        """Any number starting with 000 is "not found"; otherwise the record matches."""
+        if id_number.startswith("000"):
+            return KycCheckResult(
+                False, "NIN not found" if id_type == "nin" else "Licence not found"
+            )
+        return KycCheckResult(True, name=full_name)
+
+    def verify_business(self, *, registration_number: str, business_name: str) -> KycCheckResult:
+        """RC0000000 is "not found"; any other number matches the business name."""
+        if registration_number.endswith("0000000"):
+            return KycCheckResult(False, "CAC number not found")
+        return KycCheckResult(True, name=business_name)
+
 
 class MockSocial:
     """Accepts tokens shaped ``mock:<subject>:<email>:<name>`` (email and name may be empty),

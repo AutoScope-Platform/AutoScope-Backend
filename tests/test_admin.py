@@ -41,6 +41,7 @@ def test_overview_has_expected_shape(client, db):
         "listings_pending",
         "disputes_open",
         "reports_open",
+        "flagged_users",
     }
     assert body["gmv_by_category"]
 

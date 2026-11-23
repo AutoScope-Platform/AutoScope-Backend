@@ -40,7 +40,8 @@ SEND_LIMIT = [Depends(rate_limit("chat-send", 60, 60))]
 
 def _msg(m: Message, me: User) -> MessageOut:
     return MessageOut(
-        id=m.id, thread_id=m.thread_id, sender_id=m.sender_id, body=m.body,
+        id=m.id, thread_id=m.thread_id, sender_id=m.sender_id, client_id=m.client_id,
+        body=m.body,
         attachment_name=m.attachment_name, attachment_url=service.attachment_url(m),
         read=m.read_at is not None, created_at=m.created_at,
     )  # fmt: skip
@@ -51,24 +52,39 @@ def _msg(m: Message, me: User) -> MessageOut:
     response_model=StartThreadOut,
     status_code=status.HTTP_201_CREATED,
     summary="Message someone (opens the conversation if it does not exist)",
-    responses=error_responses(404, 422, 429),
+    description="About a listing, a booking or a tow job (give one id), or nothing. For a "
+    "booking or job, `recipient_id` can be left out: it is the other party. Send a "
+    "`client_id` so retries never create duplicates.",
+    responses=error_responses(400, 404, 422, 429),
     dependencies=SEND_LIMIT,
 )
 def start_thread(body: StartThreadIn, user: CurrentUser, db: Session = Depends(get_db)):
     thread, message = service.start_thread(
-        db, user, body.recipient_id, body.listing_id, body.message
-    )
+        db, user, body.recipient_id, body.listing_id, body.message, booking_id=body.booking_id,
+        job_id=body.job_id, client_id=body.client_id,
+    )  # fmt: skip
     return StartThreadOut(thread_id=thread.id, message=_msg(message, user))
 
 
-@router.get("/threads", response_model=ThreadPage, summary="My conversations")
+@router.get(
+    "/threads",
+    response_model=ThreadPage,
+    summary="My conversations",
+    description="Filter by `listing_id`, `booking_id` or `job_id` to find an existing chat.",
+)
 def list_threads(
     user: CurrentUser,
     limit: int = Query(20, ge=1, le=100),
     cursor: str | None = None,
+    listing_id: uuid.UUID | None = None,
+    booking_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
     db: Session = Depends(get_db),
 ) -> ThreadPage:
-    rows, next_cursor = service.list_threads(db, user, limit=limit, cursor=cursor)
+    rows, next_cursor = service.list_threads(
+        db, user, limit=limit, cursor=cursor, listing_id=listing_id, booking_id=booking_id,
+        job_id=job_id,
+    )  # fmt: skip
     return ThreadPage(
         items=[
             ThreadOut(
@@ -76,6 +92,9 @@ def list_threads(
                 other=PersonOut(id=r["other"].id, name=r["other"].display_name),
                 listing_id=r["thread"].listing_id,
                 listing_title=r["listing_title"],
+                booking_id=r["thread"].booking_id,
+                job_id=r["thread"].job_id,
+                subject_title=r["subject_title"],
                 last_message_at=r["thread"].last_message_at,
                 last_message_preview=r["thread"].last_message_preview,
                 unread=r["unread"],
@@ -121,7 +140,7 @@ def list_messages(
     dependencies=SEND_LIMIT,
 )
 def send(thread_id: uuid.UUID, body: SendIn, user: CurrentUser, db: Session = Depends(get_db)):
-    return _msg(service.send_message(db, user, thread_id, body.body), user)
+    return _msg(service.send_message(db, user, thread_id, body.body, body.client_id), user)
 
 
 @router.post(
@@ -137,6 +156,7 @@ async def send_attachment(
     user: CurrentUser,
     file: UploadFile = File(...),
     caption: str = Form(""),
+    client_id: str | None = Form(None, max_length=64),
     db: Session = Depends(get_db),
 ):
     message = service.send_attachment(
@@ -147,6 +167,7 @@ async def send_attachment(
         file.content_type or "",
         await file.read(),
         caption,
+        client_id,
     )
     return _msg(message, user)
 
@@ -177,12 +198,18 @@ def _user_for_token(token: str) -> uuid.UUID | None:
         db.close()
 
 
+@router.websocket("/ws/events")
 @router.websocket("/ws/chat")
 async def chat(websocket: WebSocket, token: str = Query("")) -> None:
-    """Live chat. Connect with `?token=<access token>`. After the first message the server
-    pushes `{"type": "message", ...}` for every new message in any of your conversations and
-    `{"type": "read", "thread_id": ...}` when the other person reads yours. Send messages
-    with `POST /threads/{id}/messages` (the WebSocket is receive-only)."""
+    """Your live events. Connect with `?token=<access token>` (`/ws/chat` is the old name).
+
+    After `{"type": "ready"}` the server pushes:
+    * `{"type": "message", ...}` for every new message in any of your conversations,
+    * `{"type": "read", "thread_id": ...}` when the other person reads yours,
+    * `{"type": "notification", "kind": "order.paid", "title", "body", "data"}` for each
+      notification. Provider apps refresh their order/booking/job queue on these instead
+      of polling (refetch `/activity?as_provider=true` when `kind` concerns them).
+    Send messages with `POST /threads/{id}/messages` (the WebSocket is receive-only)."""
     user_id = await run_in_threadpool(_user_for_token, token)
     if user_id is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)

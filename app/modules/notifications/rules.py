@@ -80,32 +80,73 @@ def listing_suspended(db, p):
     ]
 
 
+INQUIRY_TITLES = {
+    "question": ("New enquiry", "Someone asked about {title}."),
+    "offer": ("New offer", "Someone made an offer on {title}."),
+    "inspection": ("Inspection request", "Someone wants to inspect {title}."),
+    "test_drive": ("Test drive request", "Someone wants to test-drive {title}."),
+}
+
+
+def _when(iso: str | None) -> str:
+    """A viewing time in Lagos time, e.g. 'Sat 6 Dec, 10:00'."""
+    if not iso:
+        return ""
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    local = datetime.fromisoformat(iso).astimezone(timezone(timedelta(hours=1)))
+    return f"{local:%a} {local.day} {local:%b, %H:%M}"  # no %-d: it fails on Windows
+
+
 def inquiry_created(db, p):
     listing = db.get(Listing, _uid(p["listing_id"]))
-    return (
-        [
-            Notice(
-                listing.seller_id,
-                "New enquiry",
-                f"Someone asked about {listing.title}.",
-                {"listing_id": p["listing_id"]},
-            )
-        ]
-        if listing
-        else []
-    )
+    if listing is None:
+        return []
+    title, body = INQUIRY_TITLES.get(p.get("kind") or "question", INQUIRY_TITLES["question"])
+    channels = ("push", "sms") if p.get("kind") in ("inspection", "test_drive") else ("push",)
+    return [
+        Notice(
+            listing.seller_id, title, body.format(title=listing.title),
+            {"listing_id": p["listing_id"], "inquiry_id": p["inquiry_id"]}, channels,
+        )
+    ]  # fmt: skip
 
 
 def inquiry_answered(db, p):
     verb = "accepted" if p["accepted"] else "declined"
+    kind = p.get("kind") or "question"
+    if kind in ("inspection", "test_drive") and p["accepted"]:
+        what = "Inspection" if kind == "inspection" else "Test drive"
+        title, body = f"{what} confirmed", f"See you on {_when(p.get('viewing_at'))} (Lagos time)."
+        channels = ("push", "sms")
+    else:
+        noun = {"offer": "offer", "inspection": "inspection request",
+                "test_drive": "test drive request"}.get(kind, "question")  # fmt: skip
+        title, body, channels = f"Seller {verb}", f"The seller {verb} your {noun}.", ("push",)
+    return [Notice(_uid(p["buyer_id"]), title, body, {"inquiry_id": p["inquiry_id"]}, channels)]
+
+
+def low_stock(db, p):
     return [
         Notice(
-            _uid(p["buyer_id"]),
-            f"Offer {verb}",
-            f"The seller {verb} your offer or question.",
-            {"inquiry_id": p["inquiry_id"]},
+            _uid(p["seller_id"]), "Running low",
+            f"Only {p['stock']} left of {p['title']}. Restock to keep it live.",
+            {"listing_id": p["listing_id"]}, ("push", "email"),
         )
-    ]
+    ]  # fmt: skip
+
+
+def part_request_created(db, p):
+    """Tell sellers who stock that make (they can quote from the part-requests feed)."""
+    from app.modules.catalog import service as catalog  # noqa: PLC0415
+
+    what = f"{p['make']} {p['model']}".strip()
+    return [
+        Notice(seller_id, "New part request", f"{p['ref']}: a buyer needs a part for a {what}.",
+               {"request_id": p["request_id"]})
+        for seller_id in catalog.sellers_stocking_make(db, p["make"])
+        if str(seller_id) != p["buyer_id"]
+    ]  # fmt: skip
 
 
 # --- Orders ----------------------------------------------------------------------------
@@ -388,6 +429,11 @@ RULES: dict[str, Rule] = {
     "escrow.refunded": escrow_refunded,
     "dispute.opened": dispute_opened,
     "dispute.resolved": dispute_resolved,
+    "listing.low_stock": low_stock,
+    "part_request.created": part_request_created,
+    "part_request.quoted": _simple(
+        "New quote for your part request", "{ref}: a seller sent a quote.", "buyer_id", "request_id"
+    ),
     "booking.requested": _booking(
         "New booking request", "{ref}: a customer wants to book you.", "mechanic_id"
     ),
@@ -408,6 +454,15 @@ RULES: dict[str, Rule] = {
     ),
     "booking.quote_answered": _booking(
         "Quote answered", "{ref}: the customer answered your quote.", "mechanic_id"
+    ),
+    "booking.time_proposed": _booking(
+        "New time suggested",
+        "{ref}: the mechanic suggested a different time. Please accept or decline it.",
+        "customer_id",
+        ("push", "sms"),
+    ),
+    "booking.time_answered": _booking(
+        "Time answered", "{ref}: the customer answered your suggested time.", "mechanic_id"
     ),
     "booking.started": _booking("Work started", "{ref}: the mechanic started work.", "customer_id"),
     "booking.completed": _booking(
@@ -441,6 +496,12 @@ RULES: dict[str, Rule] = {
     ),
     "insurance.answered": _simple(
         "Offer answered", "{ref}: the customer answered your offer.", "insurer_id", "application_id"
+    ),
+    "insurance.withdrawn": _simple(
+        "Quote request closed",
+        "{ref}: the customer chose another insurer.",
+        "insurer_id",
+        "application_id",
     ),
     "policy.issued": _simple(
         "Policy issued",

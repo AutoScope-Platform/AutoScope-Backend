@@ -3,6 +3,13 @@
 Delivery is triggered by domain events (see `rules.py`). Each notice becomes an in-app
 inbox entry plus, depending on the rule, a push, SMS and/or e-mail. A failure to deliver one
 channel is logged and never breaks the others or the request that caused the event.
+
+Order of work (FSD 7.2: notifications must not slow down the action that caused them):
+1. the inbox rows are written and committed;
+2. a live `{"type": "notification"}` event goes to the person's open apps (`/ws/events`),
+   which is how provider queues refresh without polling;
+3. push/SMS/e-mail are handed to the background worker (`TASK_QUEUE=celery`) or, in local
+   development and tests, sent straight away.
 """
 
 from __future__ import annotations
@@ -17,11 +24,13 @@ from sqlalchemy.orm import Session
 from app.core import audit
 from app.core import db as db_module
 from app.core.audit import AuditCategory
+from app.core.config import get_settings
 from app.core.db import utcnow
 from app.core.errors import BadRequest, NotFound, UnprocessableEntity
 from app.core.events import Event, subscribe
 from app.core.pagination import paginate_cursor, paginate_page
 from app.core.permissions import Role
+from app.core.realtime import user_events
 from app.integrations import registry
 from app.modules.identity.models import AccountStatus, User, UserRole
 from app.modules.notifications.models import (
@@ -40,14 +49,15 @@ CHANNELS = ("push", "sms", "email")
 # ======================================================================================
 # Delivery
 # ======================================================================================
-def deliver(db: Session, notice: Notice, *, user: User | None = None) -> None:
-    """Send one notice to one user over the channels it asks for."""
+def deliver(db: Session, notice: Notice, *, user: User | None = None) -> tuple[User, Notice] | None:
+    """Write one notice's inbox entry. Returns what still has to go out once the caller
+    has committed (pass the results to `dispatch`), or None if nothing should be sent."""
     user = user or db.get(User, notice.user_id)
     if user is None or user.erased_at is not None:
-        return
+        return None
     # A suspended person is only told about it (by e-mail); nothing else is sent.
     if user.status == AccountStatus.SUSPENDED and notice.channels != ("email",):
-        return
+        return None
     if notice.inbox:
         db.add(
             Notification(
@@ -58,7 +68,66 @@ def deliver(db: Session, notice: Notice, *, user: User | None = None) -> None:
                 data=notice.data,
             )
         )
-    _send_channels(db, user, notice)
+    return user, notice
+
+
+def dispatch(pending: list[tuple[User, Notice] | None]) -> None:
+    """After the commit: live event to the person's open apps, then push/SMS/e-mail."""
+    for item in pending:
+        if item is None:
+            continue
+        user, notice = item
+        if notice.inbox:
+            user_events.broadcast(
+                user.id,
+                {
+                    "type": "notification",
+                    "kind": notice.data.get("kind", ""),
+                    "title": notice.title,
+                    "body": notice.body,
+                    "data": notice.data,
+                },
+            )
+        channels = [c for c in notice.channels if c in CHANNELS]
+        if channels:
+            _queue_send(
+                {
+                    "user_id": str(user.id),
+                    "title": notice.title,
+                    "body": notice.body,
+                    "data": notice.data,
+                    "channels": channels,
+                }
+            )
+
+
+def _queue_send(payload: dict) -> None:
+    """Hand push/SMS/e-mail to the worker; send now if there is no queue (or it is down)."""
+    if get_settings().task_queue == "celery":
+        try:
+            from app.worker import send_notification  # noqa: PLC0415
+
+            send_notification.delay(payload)
+            return
+        except Exception:  # noqa: BLE001 - never lose a notice because the queue is down
+            logger.exception("Could not queue a notification; sending it now")
+    send_now(payload)
+
+
+def send_now(payload: dict) -> None:
+    """Send one notice's push/SMS/e-mail. Runs in the worker (or inline without one)."""
+    db = db_module.new_session()  # looked up at call time so tests can swap it
+    try:
+        user = db.get(User, uuid.UUID(payload["user_id"]))
+        if user is None or user.erased_at is not None:
+            return
+        channels = tuple(payload["channels"])
+        if user.status == AccountStatus.SUSPENDED and channels != ("email",):
+            return
+        notice = Notice(user.id, payload["title"], payload["body"], payload["data"], channels)
+        _send_channels(db, user, notice)
+    finally:
+        db.close()
 
 
 def _send_channels(db: Session, user: User, notice: Notice) -> None:
@@ -99,12 +168,14 @@ def on_event(event: Event) -> None:
         return
     db = db_module.new_session()  # looked up at call time so tests can swap it
     try:
+        pending = []
         for notice in rule(db, event.payload):
             notice.data = {**notice.data, "kind": event.name}
-            deliver(db, notice)
+            pending.append(deliver(db, notice))
         db.commit()
     finally:
         db.close()
+    dispatch(pending)
 
 
 # ======================================================================================
@@ -230,20 +301,18 @@ def send_announcement(db: Session, announcement: Announcement) -> int:
         return locked.recipients_count
     users = audience(db, locked)
     channels = tuple(c for c in locked.channels if c in CHANNELS)
-    for user in users:
-        deliver(
-            db,
-            Notice(
-                user.id, locked.title, locked.body, {"announcement_id": str(locked.id)}, channels
-            ),
-            user=user,
-        )
+    data = {"announcement_id": str(locked.id), "kind": "announcement"}
+    pending = [
+        deliver(db, Notice(user.id, locked.title, locked.body, data, channels), user=user)
+        for user in users
+    ]
     locked.status, locked.sent_at, locked.recipients_count = (
         AnnouncementStatus.SENT,
         utcnow(),
         len(users),
     )
     db.commit()
+    dispatch(pending)
     return len(users)
 
 

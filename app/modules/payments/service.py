@@ -18,12 +18,15 @@ Section map:
     4. Escrow                 - hold, release, refund
     5. Wallet and payouts     - FR-9.5, FR-13.3
     6. Disputes               - FR-13.4
+    7. Cancellation policy    - FR-9.4, FR-10.3
+    8. Receipts               - FR-9.3
 """
 
 from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import case, func, select
@@ -42,6 +45,7 @@ from app.modules.payments.models import (
     FINAL_STATUSES,
     REF_PREFIX,
     BankAccount,
+    CancellationPolicy,
     Category,
     CommissionRate,
     Dispute,
@@ -147,12 +151,17 @@ def update_payout_settings(
     min_payout_minor: int,
     admin: User,
     ip: str | None,
+    max_cancel_fee_bps: int | None = None,
 ) -> PayoutSettings:
     if not 0 <= payout_weekday <= 6 or hold_days < 0 or min_payout_minor < 0:
         raise BadRequest("Invalid payout settings", code="invalid_settings")
+    if max_cancel_fee_bps is not None and not 0 <= max_cancel_fee_bps <= 10_000:
+        raise BadRequest("The fee cap must be between 0 and 100%", code="invalid_settings")
     row = get_payout_settings(db)
     row.frequency, row.payout_weekday = frequency, payout_weekday
     row.hold_days, row.min_payout_minor = hold_days, min_payout_minor
+    if max_cancel_fee_bps is not None:  # left out = unchanged (older dashboard builds)
+        row.max_cancel_fee_bps = max_cancel_fee_bps
     audit.record(
         db,
         category=AuditCategory.ADMIN,
@@ -400,6 +409,7 @@ def _apply_successful_payment(db: Session, payment: Payment, tx: Transaction) ->
     tx.paid_at, tx.payment_due = now, False
     tx.commission_rate_bps, tx.commission_cap_minor = rate.rate_bps, rate.cap_minor
     tx.uses_escrow = rate.uses_escrow
+    _snapshot_cancellation_terms(db, tx)
     if rate.uses_escrow:
         tx.escrow_status = EscrowStatus.HELD
     else:
@@ -533,12 +543,33 @@ def refund_escrow(
     return tx
 
 
-def cancel_and_refund(db: Session, tx: Transaction, *, reason: str) -> None:
-    """Used by owning modules when a customer cancels. Refunds if money was paid; no commit."""
+def cancel_and_refund(db: Session, tx: Transaction, *, reason: str, fee_minor: int = 0) -> None:
+    """Used by owning modules when someone cancels; no commit.
+
+    A paid sale is refunded from escrow. With `fee_minor` (a late cancellation under the
+    provider's policy) the customer gets the rest back and the provider is paid the fee,
+    minus commission, at once. If the money has already left escrow (a category that does
+    not use escrow), nothing is cancelled: the refund needs a dispute or support.
+    """
+    if tx.paid_at is not None and tx.escrow_status not in (EscrowStatus.HELD, EscrowStatus.FROZEN):
+        raise UnprocessableEntity(
+            "This payment has already been passed to the provider, so it cannot be refunded "
+            "automatically. Open a dispute or contact support.",
+            code="refund_not_possible",
+        )
     tx.payment_due = False
     tx.status = TxStatus.CANCELLED
-    if tx.paid_at is not None and tx.escrow_status in (EscrowStatus.HELD, EscrowStatus.FROZEN):
+    if tx.paid_at is None:
+        db.flush()
+        return
+    fee_minor = max(0, min(fee_minor, tx.amount_minor))
+    if fee_minor == 0:
         refund_escrow(db, tx.id, reason=reason, commit=False)
+    else:
+        if tx.amount_minor > fee_minor:
+            _refund(db, tx, tx.amount_minor - fee_minor, f"{reason} (late cancellation fee kept)")
+        _settle_to_provider(db, tx, fee_minor)
+        tx.escrow_status = EscrowStatus.RELEASED
     db.flush()
 
 
@@ -935,3 +966,195 @@ def resolve_dispute(
     db.commit()
     publish("dispute.resolved", dispute_id=str(dispute.id), ref=dispute.ref, outcome=outcome.value)
     return dispute
+
+
+# ======================================================================================
+# 7. Cancellation policy (FR-9.4, FR-10.3)
+# ======================================================================================
+def get_cancellation_policy(db: Session, provider_id: uuid.UUID) -> CancellationPolicy | None:
+    return db.scalar(
+        select(CancellationPolicy).where(CancellationPolicy.provider_id == provider_id)
+    )
+
+
+def set_cancellation_policy(
+    db: Session,
+    provider: User,
+    *,
+    free_cancel_hours: int,
+    late_cancel_fee_bps: int,
+    order_cancel_window_hours: int | None,
+) -> CancellationPolicy:
+    """Save a provider's terms. They apply to sales paid from now on."""
+    cap = get_payout_settings(db).max_cancel_fee_bps
+    if late_cancel_fee_bps > cap:
+        raise UnprocessableEntity(
+            f"The late cancellation fee can be at most {cap / 100:g}%",
+            code="fee_above_cap",
+            details={"max_bps": cap},
+        )
+    policy = get_cancellation_policy(db, provider.id) or CancellationPolicy(provider_id=provider.id)
+    policy.free_cancel_hours = free_cancel_hours
+    policy.late_cancel_fee_bps = late_cancel_fee_bps
+    policy.order_cancel_window_hours = order_cancel_window_hours
+    db.add(policy)
+    db.commit()
+    return policy
+
+
+def _snapshot_cancellation_terms(db: Session, tx: Transaction) -> None:
+    policy = get_cancellation_policy(db, tx.provider_id) if tx.provider_id else None
+    if policy is None:
+        return
+    tx.cancel_free_hours = policy.free_cancel_hours
+    tx.cancel_fee_bps = min(policy.late_cancel_fee_bps, get_payout_settings(db).max_cancel_fee_bps)
+    tx.cancel_window_hours = policy.order_cancel_window_hours
+
+
+def cancellation_terms(
+    db: Session, tx: Transaction, starts_at: datetime | None, *, now: datetime | None = None
+) -> dict:
+    """What cancelling costs the customer, for display before they decide.
+
+    Paid sales use the terms copied at payment; unpaid ones show the provider's current
+    policy (what they would get if they paid now). `starts_at` is the appointment time for
+    bookings; without it there is no late fee.
+    """
+    now = now or utcnow()
+    if tx.paid_at is not None:
+        hours, bps = tx.cancel_free_hours or 0, tx.cancel_fee_bps or 0
+    else:
+        policy = get_cancellation_policy(db, tx.provider_id) if tx.provider_id else None
+        cap = get_payout_settings(db).max_cancel_fee_bps
+        hours = policy.free_cancel_hours if policy else 0
+        bps = min(policy.late_cancel_fee_bps, cap) if policy else 0
+    if not bps or starts_at is None:
+        return {"free_until": None, "late_fee_bps": 0, "fee_if_cancelled_now_minor": 0}
+    free_until = starts_at - timedelta(hours=hours)
+    fee_now = tx.amount_minor * bps // 10_000 if tx.paid_at is not None and now >= free_until else 0
+    return {"free_until": free_until, "late_fee_bps": bps, "fee_if_cancelled_now_minor": fee_now}
+
+
+def late_cancel_fee(tx: Transaction, starts_at: datetime, *, now: datetime | None = None) -> int:
+    """The fee kept when the *customer* cancels a paid booking inside the late window."""
+    if tx.paid_at is None or not tx.cancel_fee_bps:
+        return 0
+    free_until = starts_at - timedelta(hours=tx.cancel_free_hours or 0)
+    if (now or utcnow()) < free_until:
+        return 0
+    return tx.amount_minor * tx.cancel_fee_bps // 10_000
+
+
+def cancel_deadline(tx: Transaction) -> datetime | None:
+    """For parts orders: until when the buyer may cancel (None = until it ships)."""
+    if tx.paid_at is None or tx.cancel_window_hours is None:
+        return None
+    return tx.paid_at + timedelta(hours=tx.cancel_window_hours)
+
+
+# ======================================================================================
+# 8. Receipts (FR-9.3)
+# ======================================================================================
+ReceiptLines = Callable[[Session, Transaction], list[tuple[str, int]]]
+_RECEIPT_LINES: dict[TransactionKind, ReceiptLines] = {}
+
+KIND_LABELS = {
+    TransactionKind.PARTS_ORDER: "Parts order",
+    TransactionKind.VEHICLE_SALE: "Vehicle purchase",
+    TransactionKind.SERVICE_BOOKING: "Mechanic service",
+    TransactionKind.HAULAGE_JOB: "Towing / haulage",
+    TransactionKind.POLICY_PURCHASE: "Insurance premium",
+}
+
+
+def receipt_lines(*kinds: TransactionKind) -> Callable[[ReceiptLines], ReceiptLines]:
+    """Decorator for the module that owns a kind of sale to itemise its receipt.
+
+    Payments cannot import those modules (they import payments), so they register here.
+    """
+
+    def register(fn: ReceiptLines) -> ReceiptLines:
+        for kind in kinds:
+            _RECEIPT_LINES[kind] = fn
+        return fn
+
+    return register
+
+
+def build_receipt(db: Session, tx: Transaction) -> dict:
+    """A receipt for any paid sale: who paid whom, for what, how, and any refund."""
+    if tx.paid_at is None:
+        raise UnprocessableEntity(
+            "A receipt is issued once the payment has gone through", code="not_paid"
+        )
+    payment = db.scalar(
+        select(Payment)
+        .where(Payment.transaction_id == tx.id, Payment.status == PaymentStatus.SUCCEEDED)
+        .order_by(Payment.created_at.desc())
+    )
+    lines = _RECEIPT_LINES.get(tx.kind, lambda _db, _tx: [])(db, tx) or [
+        (KIND_LABELS[tx.kind], tx.amount_minor)
+    ]
+    refunded = db.scalar(
+        select(func.coalesce(func.sum(Refund.amount_minor), 0)).where(
+            Refund.transaction_id == tx.id
+        )
+    )
+    customer = db.get(User, tx.customer_id)
+    provider = db.get(User, tx.provider_id) if tx.provider_id else None
+    return {
+        "receipt_number": f"RCT-{tx.ref_no}",
+        "ref": tx.ref,
+        "kind": tx.kind,
+        "description": KIND_LABELS[tx.kind],
+        "issued_at": tx.paid_at,
+        "customer_name": customer.display_name if customer else "",
+        "provider_name": provider.display_name if provider else None,
+        "lines": [{"description": d, "amount_minor": a} for d, a in lines],
+        "total_minor": tx.amount_minor,
+        "refunded_minor": int(refunded or 0),
+        "net_paid_minor": tx.amount_minor - int(refunded or 0),
+        "currency": tx.currency,
+        "payment_method": payment.method if payment else None,
+        "payment_reference": payment.reference if payment else None,
+        "status": tx.status,
+        "escrow_status": tx.escrow_status,
+    }
+
+
+def receipt_html(receipt: dict) -> str:
+    """A printable receipt (the apps open it and 'Print / Save as PDF')."""
+    from html import escape  # noqa: PLC0415
+
+    def naira(minor: int) -> str:
+        return f"NGN {minor / 100:,.2f}"
+
+    head = [
+        ("Receipt", receipt["receipt_number"]), ("Reference", receipt["ref"]),
+        ("Date", f"{receipt['issued_at']:%d %b %Y, %H:%M} UTC"),
+        ("Paid by", receipt["customer_name"]), ("Paid to", receipt["provider_name"] or "AutoScope"),
+        ("Method", (receipt["payment_method"] or "-").replace("_", " ")),
+        ("Payment reference", receipt["payment_reference"] or "-"),
+    ]  # fmt: skip
+    rows = "".join(f"<tr><th>{escape(k)}</th><td>{escape(str(v))}</td></tr>" for k, v in head)
+    items = "".join(
+        f"<tr><td>{escape(line['description'])}</td><td class=r>{naira(line['amount_minor'])}</td></tr>"
+        for line in receipt["lines"]
+    )
+    totals = f"<tr><th>Total</th><td class=r><b>{naira(receipt['total_minor'])}</b></td></tr>"
+    if receipt["refunded_minor"]:
+        totals += (
+            f"<tr><th>Refunded</th><td class=r>-{naira(receipt['refunded_minor'])}</td></tr>"
+            f"<tr><th>Net paid</th><td class=r>{naira(receipt['net_paid_minor'])}</td></tr>"
+        )
+    return (
+        "<!doctype html><meta charset=utf-8><title>Receipt</title>"
+        "<style>body{font-family:sans-serif;max-width:640px;margin:40px auto}"
+        "th{text-align:left;padding:6px 16px 6px 0;color:#555}td{padding:6px 0}"
+        "table{width:100%;border-collapse:collapse}.r{text-align:right}"
+        ".items td{border-top:1px solid #ddd}</style>"
+        f"<h1>Receipt</h1><p>{escape(receipt['description'])}</p><table>{rows}</table>"
+        f"<h2>Items</h2><table class=items>{items}{totals}</table>"
+        "<p><small>Issued by AutoScope. Payments are held in escrow until the order, "
+        "booking or job is complete.</small></p>"
+    )

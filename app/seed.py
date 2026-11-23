@@ -26,7 +26,7 @@ from app.core.config import get_settings
 from app.core.db import utcnow
 from app.core.permissions import BUSINESS_ROLES, Role
 from app.core.security import hash_password
-from app.modules.catalog.models import Listing, ListingStatus, ListingType
+from app.modules.catalog.models import Listing, ListingStatus, ListingType, PartFitment
 from app.modules.identity.models import KycStatus, User, UserRole
 from app.modules.payments import service as payments
 from app.modules.payments.models import PaymentMethod, TransactionKind
@@ -126,13 +126,23 @@ def run(db: Session) -> None:
     pad = _listing(
         db, parts, ListingType.PART, "Brake pads - Toyota Camry", 28_500, "Ikeja", stock=40
     )
-    _listing(db, parts, ListingType.PART, "Air filter - Honda Accord", 9_000, "Ikeja", stock=75)
+    # SKU and vehicle fitment so "parts that fit my car" search has something to find.
+    pad.sku = "NAP-BP-CAMRY"
+    pad.fitments = [
+        PartFitment(make="Toyota", model="Camry", year_from=2012, year_to=2019),
+        PartFitment(make="Toyota", model="Venza", year_from=2013, year_to=2016),
+    ]
+    air = _listing(
+        db, parts, ListingType.PART, "Air filter - Honda Accord", 9_000, "Ikeja", stock=75
+    )
+    air.sku = "NAP-AF-ACCORD"
+    air.fitments = [PartFitment(make="Honda", model="Accord", year_from=2013, year_to=2017)]
     _listing(db, parts, ListingType.PART, "Car battery 70Ah", 85_000, "Surulere",
              status=ListingStatus.PENDING, stock=12)  # fmt: skip
     svc = _listing(db, mech, ListingType.MECHANIC_SERVICE, "Full service (oil, filters, inspection)", 45_000, "Yaba",
-                   attributes={"duration_minutes": 120, "pricing": "fixed"})  # fmt: skip
+                   attributes={"duration_minutes": 120, "pricing": "fixed", "category": "servicing"})  # fmt: skip
     _listing(db, mech, ListingType.MECHANIC_SERVICE, "Engine diagnostics", 15_000, "Yaba",
-             attributes={"duration_minutes": 60, "pricing": "fixed"})  # fmt: skip
+             attributes={"duration_minutes": 60, "pricing": "fixed", "category": "diagnostics"})  # fmt: skip
     _listing(db, insurer, ListingType.INSURANCE_PRODUCT, "Comprehensive cover", 120_000, "Victoria Island",
              attributes={"cover": "comprehensive"})  # fmt: skip
     _listing(db, insurer, ListingType.INSURANCE_PRODUCT, "Third-party cover", 25_000, "Victoria Island",

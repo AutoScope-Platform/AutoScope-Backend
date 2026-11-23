@@ -62,16 +62,45 @@ PostgreSQL 16 with **PostGIS**. Listings and provider locations have a `geograph
 column plus plain `latitude`/`longitude`. Distance search uses `ST_DWithin` / `ST_Distance`.
 Extensions `postgis`, `pg_trgm`, `pgcrypto` are created by the baseline migration.
 
+Keyword search matches every word of `q` (in any order) in the title, description or SKU,
+backed by trigram (GIN) indexes on those columns; `sort=relevance` ranks by trigram word
+similarity. The TSD suggests OpenSearch; Postgres is enough at the FSD's 100,000-listing
+target, as measured below, so a separate search service can wait until data or load needs it.
+
+**Search load test** (`python -m scripts.loadtest_search`, 100,000 listings, 2,000 sellers,
+in-process through the real endpoints, laptop Postgres 16): every search p95 under 350 ms
+(FSD 5.1 target: 2 s). Keyword search: ~105 ms p50 for one word, ~47 ms for three words,
+against ~710 / ~750 ms without the trigram indexes. Re-run it against staging-sized hardware
+before launch and after big changes to search.
+
 ## Real time
 
-`core/realtime.py` is a small in-process hub used by the haulage tracking socket and the chat
-socket. **It works in one process only.** Before running more than one API instance, replace
-the hub's fan-out with Redis pub/sub (the interface is two methods).
+`core/realtime.py` fans messages out to open WebSockets. Two hubs: `user_events` (one channel
+per person: chat messages, read receipts and live notifications, at `/ws/events`, old name
+`/ws/chat`) and haulage tracking (one per job, `/ws/jobs/{id}/track`).
+
+With `REDIS_URL` set, a broadcast is published on Redis (`rt:<hub>:<key>`) and every API
+instance forwards it to its own sockets, so several instances (and the worker) can push live
+events. Without Redis everything stays in one process (local development, tests). If Redis
+is down, a broadcast still reaches the sockets on the instance that sent it.
+
+Every notification also goes to the person's `/ws/events` as `{"type": "notification",
+"kind": ...}`, which is how provider apps refresh their order/booking/job queue without
+polling.
+
+## Notifications
+
+Inbox rows are written and committed first; the live event follows; push/SMS/e-mail go to
+the worker (`notifications.send` task) when `TASK_QUEUE=celery`, so a slow SMS or e-mail
+provider never slows the request that caused the notification (FSD 7.2). With
+`TASK_QUEUE=inline` (the default for local development and tests) they are sent at once. If
+the queue cannot be reached, the notice is sent at once rather than lost.
 
 ## Background jobs
 
 | Job | When | What |
 | --- | --- | --- |
+| notifications.send | on demand | push/SMS/e-mail for one notice (queued by `dispatch`) |
 | haulage redispatch | every minute | expire stale offers, widen search for unassigned jobs |
 | announcements | every minute | send scheduled announcements |
 | escrow release | every 10 min | release funds whose dispute window passed |

@@ -192,6 +192,14 @@ class KycSubmission(UUIDPrimaryKey, Timestamps, Base):
         enum_type(IdCheckStatus), default=IdCheckStatus.PENDING
     )
     id_check_reason: Mapped[str | None] = mapped_column(String(200))
+    # Numbers the provider gives for the automated check (PUT /me/kyc-details).
+    id_type: Mapped[str | None] = mapped_column(String(20))  # nin | drivers_license
+    id_number: Mapped[str | None] = mapped_column(String(40))  # cleared once checked
+    id_number_last4: Mapped[str | None] = mapped_column(String(4))
+    registration_number: Mapped[str | None] = mapped_column(String(30))  # CAC, e.g. RC123456
+    # What the ID service returned, for the admin to compare with the documents.
+    verified_person_name: Mapped[str | None] = mapped_column(String(200))
+    verified_business_name: Mapped[str | None] = mapped_column(String(300))
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")

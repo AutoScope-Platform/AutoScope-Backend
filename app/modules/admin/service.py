@@ -115,6 +115,7 @@ def overview(db: Session, *, days: int) -> dict:
             "listings_pending": catalog.review_counts(db)["pending"],
             "disputes_open": payments.dispute_counts(db)["open"],
             "reports_open": reviews.report_counts(db)["open"],
+            "flagged_users": len(risk_flags(db)),
         },
         "recent_actions": [
             {"at": a.created_at, "actor": a.actor_name, "action": a.action, "target": a.target}
@@ -259,3 +260,101 @@ def export_audit_csv(
     )
     db.commit()
     return out.getvalue()
+
+
+# ======================================================================================
+# 4. Repeat offenders (TSD: "repeat-offender rules feed the admin review queue")
+# ======================================================================================
+RISK_WINDOW_DAYS = 90
+FLAG_AT_SCORE = 3
+# How much each kind of strike counts. Things an admin already upheld weigh more.
+RISK_WEIGHTS = {
+    "suspended_listings": 2,
+    "upheld_reports": 2,
+    "disputes_lost": 2,
+    "rejected_listings": 1,
+    "fraud_flagged_listings": 1,
+}
+RISK_LABELS = {
+    "suspended_listings": "listing(s) taken down",
+    "upheld_reports": "report(s) upheld",
+    "disputes_lost": "dispute(s) refunded to the buyer",
+    "rejected_listings": "listing(s) rejected",
+    "fraud_flagged_listings": "listing(s) with fraud signals",
+}
+
+
+def risk_flags(db: Session, *, days: int = RISK_WINDOW_DAYS) -> list[dict]:
+    """Accounts with repeated problems in the last `days`, worst first.
+
+    Counted per user: listings rejected or taken down, listings with automatic fraud
+    signals, reports against them that an admin upheld (on their account, listing or
+    review), and disputes refunded to the buyer when they were the provider. Each kind has
+    a weight; an account is flagged at a score of 3 (e.g. two take-downs, or three
+    rejections). Read-only: an admin decides what to do (suspend, remove, nothing).
+    """
+    from collections import Counter, defaultdict  # noqa: PLC0415
+
+    from app.modules.payments.models import Dispute, DisputeOutcome  # noqa: PLC0415
+    from app.modules.reviews.models import Report, ReportStatus, ReportTarget, Review  # noqa: PLC0415
+
+    since = utcnow() - timedelta(days=days)
+    strikes: dict = defaultdict(Counter)
+
+    for seller_id, status, n in db.execute(
+        select(Listing.seller_id, Listing.status, func.count())
+        .where(
+            Listing.status.in_([ListingStatus.REJECTED, ListingStatus.SUSPENDED]),
+            Listing.updated_at >= since,
+        )
+        .group_by(Listing.seller_id, Listing.status)
+    ):
+        key = "rejected_listings" if status == ListingStatus.REJECTED else "suspended_listings"
+        strikes[seller_id][key] += n
+    for seller_id, n in db.execute(
+        select(Listing.seller_id, func.count())
+        .where(func.jsonb_array_length(Listing.fraud_signals) > 0, Listing.created_at >= since)
+        .group_by(Listing.seller_id)
+    ):
+        strikes[seller_id]["fraud_flagged_listings"] += n
+    for target_type, target_id in db.execute(
+        select(Report.target_type, Report.target_id).where(
+            Report.status == ReportStatus.ACTIONED, Report.updated_at >= since
+        )
+    ):
+        if target_type == ReportTarget.ACCOUNT:
+            owner = target_id
+        elif target_type == ReportTarget.LISTING:
+            owner = db.scalar(select(Listing.seller_id).where(Listing.id == target_id))
+        else:
+            owner = db.scalar(select(Review.author_id).where(Review.id == target_id))
+        if owner:
+            strikes[owner]["upheld_reports"] += 1
+    for provider_id, n in db.execute(
+        select(Dispute.provider_id, func.count())
+        .where(Dispute.outcome == DisputeOutcome.REFUND_BUYER, Dispute.resolved_at >= since)
+        .group_by(Dispute.provider_id)
+    ):
+        strikes[provider_id]["disputes_lost"] += n
+
+    scored = {
+        uid: sum(RISK_WEIGHTS[k] * n for k, n in counts.items()) for uid, counts in strikes.items()
+    }
+    flagged = [uid for uid, score in scored.items() if score >= FLAG_AT_SCORE]
+    if not flagged:
+        return []
+    users = {
+        u.id: u
+        for u in db.scalars(select(User).where(User.id.in_(flagged), User.erased_at.is_(None)))
+    }
+    out = [
+        {
+            "user": users[uid],
+            "score": scored[uid],
+            "signals": {k: strikes[uid].get(k, 0) for k in RISK_WEIGHTS},
+            "reasons": [f"{n} {RISK_LABELS[k]}" for k, n in strikes[uid].items() if n],
+        }
+        for uid in flagged
+        if uid in users
+    ]
+    return sorted(out, key=lambda r: (-r["score"], r["user"].created_at))
