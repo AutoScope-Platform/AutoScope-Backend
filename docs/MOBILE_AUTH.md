@@ -85,4 +85,6 @@ Business accounts (dealer, parts, mechanic, haulage, insurer) verify before thei
 3. `GET /me/kyc` shows progress: `missing_documents`, `status` (`incomplete`, `pending`,
    `approved`, `rejected`) and `rejection_reason`. Only the last 4 digits of the ID number are kept.
 
-On staging, NIN `12345678901` passes; any ID number starting with `000` is "not found".
+With the mock (local and demo), any ID number starting with `000` is "not found" and the rest pass. With the
+Youverify sandbox, use NIN `11111111111` (Sarah Jane Doe) or licence `AAA00000AA00` (John Doe); the
+account name must contain the same first and last name to pass. Licence numbers are at most 12 characters.
