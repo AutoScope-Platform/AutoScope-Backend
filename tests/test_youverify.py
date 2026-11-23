@@ -139,7 +139,7 @@ def test_document_images_pass_to_the_admin():
 # --- Settings ---------------------------------------------------------------------------
 def test_driver_needs_a_key():
     with pytest.raises(IntegrationError):
-        YouverifyKyc(Settings(kyc_driver="youverify"))
+        YouverifyKyc(Settings(kyc_driver="youverify", youverify_api_key=None))
 
 
 def test_registry_builds_youverify(monkeypatch):
