@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     paystack_public_key: str | None = None
     termii_api_key: str | None = None
     termii_sender_id: str | None = None
+    # Each Termii account has its own API address (shown on the Termii dashboard).
+    termii_base_url: str = "https://v4.api.termii.com"
+    # "dnd" reaches every number and is what Termii requires for OTPs and transactional
+    # messages (Termii support switches it on per account); "generic" is promotional only.
+    termii_channel: Literal["dnd", "generic"] = "dnd"
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
