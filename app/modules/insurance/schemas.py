@@ -7,6 +7,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
+from app.core.legal import INSURANCE_DISCLOSURE
 from app.modules.insurance.models import ClaimStatus, PolicyStatus
 from app.modules.payments.models import EscrowStatus, TxStatus
 
@@ -15,6 +16,15 @@ class ApplyIn(BaseModel):
     product_id: uuid.UUID = Field(description="A live insurance product listing.")
     vehicle_id: uuid.UUID = Field(description="A vehicle in your garage.")
     details: str = Field("", max_length=2000, examples=["Used daily for ride-hailing"])
+
+
+class QuoteRequestIn(BaseModel):
+    """Ask several insurers at once (FR-7.2): give a cover type, or the products to ask."""
+
+    vehicle_id: uuid.UUID = Field(description="A vehicle in your garage.")
+    details: str = Field("", max_length=2000, examples=["Private use, Lagos, no claims"])
+    cover_type: str | None = Field(None, max_length=60, examples=["comprehensive"])
+    product_ids: list[uuid.UUID] | None = Field(None, max_length=10)
 
 
 class OfferIn(BaseModel):
@@ -49,7 +59,17 @@ class ApplicationOut(BaseModel):
     offer_valid_until: datetime | None
     decline_reason: str | None
     is_renewal: bool
+    quote_request_id: uuid.UUID | None = None
     created_at: datetime
+    disclosure: str = Field(INSURANCE_DISCLOSURE, description="Show with every offer (FSD 5.7).")
+
+
+class QuoteComparisonOut(BaseModel):
+    """All answers to one quote request, best first: an accepted offer, then offers from the
+    cheapest premium up, then those still waiting, then declined or withdrawn."""
+
+    id: uuid.UUID
+    items: list[ApplicationOut]
 
 
 class ApplicationPage(BaseModel):
@@ -69,6 +89,7 @@ class PolicyOut(BaseModel):
     ends_on: date
     holder_id: uuid.UUID
     insurer_id: uuid.UUID
+    disclosure: str = Field(INSURANCE_DISCLOSURE, description="Show with the policy (FSD 5.7).")
 
 
 class ClaimIn(BaseModel):

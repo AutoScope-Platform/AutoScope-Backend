@@ -1,7 +1,9 @@
 """Real SMS (Termii) and email (SMTP) drivers.
 
-Termii: set `TERMII_API_KEY` and `TERMII_SENDER_ID`. Nigerian networks require a
-registered sender ID, which can take several days to approve, so apply early.
+Termii: set `TERMII_API_KEY`, `TERMII_SENDER_ID` and `TERMII_BASE_URL` (each account has its
+own API address, shown on the Termii dashboard). Nigerian networks require a registered
+sender ID, which can take several days to approve, so apply early. OTPs go on the `dnd`
+route (`TERMII_CHANNEL`), which Termii support switches on per account.
 
 SMTP: set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` (ZeptoMail, Resend
 SMTP, Mailgun and others all work).
@@ -19,31 +21,35 @@ from app.integrations.base import IntegrationError
 
 
 class TermiiSms:
-    URL = "https://api.ng.termii.com/api/sms/send"
-
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         if not (settings.termii_api_key and settings.termii_sender_id):
             raise IntegrationError("TERMII_API_KEY / TERMII_SENDER_ID are not set")
         self._key = settings.termii_api_key
         self._sender = settings.termii_sender_id
+        self._channel = settings.termii_channel
+        self.url = f"{settings.termii_base_url.rstrip('/')}/api/sms/send"
         self._client = client or httpx.Client(timeout=15)
 
     def send(self, to: str, message: str) -> None:
         try:
             response = self._client.post(
-                self.URL,
+                self.url,
                 json={
                     "to": to.lstrip("+"),
                     "from": self._sender,
                     "sms": message,
                     "type": "plain",
-                    "channel": "generic",
+                    "channel": self._channel,
                     "api_key": self._key,
                 },
             )
-            response.raise_for_status()
         except httpx.HTTPError as exc:
             raise IntegrationError(f"Termii request failed: {exc}") from exc
+        if response.is_error:
+            # Termii explains failures in the body ("Insufficient balance", "Invalid Sender Id").
+            raise IntegrationError(
+                f"Termii refused the SMS ({response.status_code}): {response.text[:200]}"
+            )
 
 
 class SmtpEmail:

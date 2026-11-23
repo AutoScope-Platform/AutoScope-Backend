@@ -33,6 +33,9 @@ On staging the SMS/e-mail drivers are mocks: every code is **123456**.
    `roles`, and `business_name` / `full_name` / `city` as needed.
 5. Apple gives the person's name to the app only on the very first sign-in: send it as
    `full_name` then.
+   On Android, ask Google for the ID token with the **web** client id (`serverClientId` /
+   `requestIdToken`); on iOS the iOS client id is fine. Both ids must be in the backend's
+   `GOOGLE_CLIENT_IDS`, or the token is refused with `401 invalid_social_token`.
 6. If an e-mail/password account already has the same verified e-mail, it is linked
    automatically and the person signs into that account.
 
@@ -70,3 +73,16 @@ allowed); anything else gets `400 invalid_file_type` / `unsupported_file_type`.
 ## Rate limits
 `429 rate_limited` means wait a minute. Sign-in and sign-up are limited per IP; listing
 creation, checkout and payments are limited per signed-in user.
+
+## Business verification (KYC, FR-1.4)
+Business accounts (dealer, parts, mechanic, haulage, insurer) verify before their listings go live:
+1. `PUT /me/kyc-details` with `consent: true` (show a checkbox: "I agree to have these numbers
+   checked against government records"), `id_type` (`nin` or `drivers_license`) and
+   `id_number`, and `registration_number` (CAC, e.g. `RC1234567`). Send it **before** the last
+   document. `422` explains a badly formed number.
+2. `POST /me/kyc-documents` three times (`government_id`, `business_registration`, `licence`).
+   When the third arrives, the numbers are checked and the submission goes to the admin.
+3. `GET /me/kyc` shows progress: `missing_documents`, `status` (`incomplete`, `pending`,
+   `approved`, `rejected`) and `rejection_reason`. Only the last 4 digits of the ID number are kept.
+
+On staging, NIN `12345678901` passes; any ID number starting with `000` is "not found".

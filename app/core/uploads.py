@@ -18,6 +18,9 @@ EXTENSIONS = {
     "image/png": ".png",
     "image/webp": ".webp",
     "application/pdf": ".pdf",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
 }
 
 
@@ -31,6 +34,10 @@ def sniff(data: bytes) -> str | None:
         return "image/webp"
     if data.startswith(b"%PDF"):
         return "application/pdf"
+    if len(data) >= 12 and data[4:8] == b"ftyp":  # ISO media: MP4 and iPhone .mov
+        return "video/quicktime" if data[8:12] == b"qt  " else "video/mp4"
+    if data.startswith(b"\x1aE\xdf\xa3"):  # Matroska / WebM
+        return "video/webm"
     return None
 
 

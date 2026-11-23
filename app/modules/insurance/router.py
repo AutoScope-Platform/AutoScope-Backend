@@ -27,6 +27,8 @@ from app.modules.insurance.schemas import (
     ClaimPage,
     OfferIn,
     PolicyOut,
+    QuoteComparisonOut,
+    QuoteRequestIn,
     ReasonIn,
 )
 from app.modules.payments.models import Transaction
@@ -44,7 +46,8 @@ def _app_out(a: Application, tx: Transaction) -> ApplicationOut:
         product_title=a.product_title, cover_type=a.cover_type, vehicle_summary=a.vehicle_summary,
         details=a.details, premium_minor=a.premium_minor, terms=a.terms,
         offer_valid_until=a.offer_valid_until, decline_reason=a.decline_reason,
-        is_renewal=a.renewal_of_id is not None, created_at=a.created_at,
+        is_renewal=a.renewal_of_id is not None, quote_request_id=a.quote_request_id,
+        created_at=a.created_at,
     )  # fmt: skip
 
 
@@ -284,3 +287,33 @@ def decide_claim(
         approved_amount_minor=body.approved_amount_minor, note=body.note,
     )  # fmt: skip
     return _claim_out(db, claim)
+
+
+# --- Comparing insurers (FR-7.2) ---------------------------------------------------------
+@router.post(
+    "/insurance/quote-requests",
+    response_model=QuoteComparisonOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ask several insurers for a quote at once",
+    description="Sends the vehicle and details to every insurer with a live product of "
+    "`cover_type` (or to `product_ids`), up to 10. Each insurer answers as usual; compare "
+    "with `GET /insurance/quote-requests/{id}`. Accepting one offer withdraws the others.",
+    responses=error_responses(400, 404),
+)
+def request_quotes(body: QuoteRequestIn, user: User = Customer, db: Session = Depends(get_db)):
+    group, applications = service.request_quotes(db, user, **body.model_dump())
+    return QuoteComparisonOut(
+        id=group,
+        items=[_app_out(a, t) for a, t in service.quote_comparison(db, user, group)],
+    )
+
+
+@router.get(
+    "/insurance/quote-requests/{quote_request_id}",
+    response_model=QuoteComparisonOut,
+    summary="Compare the insurers' answers",
+    responses=error_responses(404),
+)
+def compare_quotes(quote_request_id: uuid.UUID, user: CurrentUser, db: Session = Depends(get_db)):
+    rows = service.quote_comparison(db, user, quote_request_id)
+    return QuoteComparisonOut(id=quote_request_id, items=[_app_out(a, t) for a, t in rows])

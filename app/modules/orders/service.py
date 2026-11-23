@@ -8,6 +8,10 @@ handover) and the listing goes reserved -> sold.
 
 Stock is taken at checkout (under a row lock so two buyers cannot take the last unit)
 and given back on cancellation.
+
+Delivery (FR-4.3): each seller's order adds that seller's delivery fee, worked out from
+their `DeliverySettings` and the buyer's delivery city. The fee is part of the order's
+transaction amount, so it is paid, held in escrow and refunded with the parts.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from app.core.db import utcnow
 from app.core.errors import BadRequest, NotFound, UnprocessableEntity
 from app.core.events import Event, publish, subscribe
 from app.core.permissions import ADMIN_ROLES
+from app.modules.catalog import service as catalog
 from app.modules.catalog.models import (
     InquiryStatus,
     Listing,
@@ -31,7 +36,7 @@ from app.modules.catalog.models import (
     ListingType,
 )
 from app.modules.identity.models import User
-from app.modules.orders.models import CartItem, Order, OrderItem
+from app.modules.orders.models import CartItem, DeliverySettings, Order, OrderItem
 from app.modules.payments import service as payments
 from app.modules.payments.models import FINAL_STATUSES, Transaction, TransactionKind, TxStatus
 
@@ -92,6 +97,85 @@ def clear_cart(db: Session, buyer: User) -> None:
 
 
 # ======================================================================================
+# Delivery fees (FR-4.3)
+# ======================================================================================
+def get_delivery_settings(db: Session, seller_id: uuid.UUID) -> DeliverySettings | None:
+    return db.scalar(select(DeliverySettings).where(DeliverySettings.seller_id == seller_id))
+
+
+def set_delivery_settings(
+    db: Session,
+    seller: User,
+    *,
+    same_city_fee_minor: int,
+    other_city_fee_minor: int,
+    free_over_minor: int | None,
+) -> DeliverySettings:
+    settings = get_delivery_settings(db, seller.id) or DeliverySettings(seller_id=seller.id)
+    settings.same_city_fee_minor = same_city_fee_minor
+    settings.other_city_fee_minor = other_city_fee_minor
+    settings.free_over_minor = free_over_minor
+    db.add(settings)
+    db.commit()
+    return settings
+
+
+def _same_city(a: str | None, b: str | None) -> bool:
+    return bool(a and b and a.strip().casefold() == b.strip().casefold())
+
+
+def delivery_fee(
+    settings: DeliverySettings | None,
+    *,
+    seller_city: str | None,
+    delivery_city: str | None,
+    subtotal_minor: int,
+) -> int:
+    """The fee for one seller's part of an order. Without a delivery city the other-city
+    fee applies, so the buyer is never charged less than the seller expects."""
+    if settings is None:
+        return 0
+    if settings.free_over_minor is not None and subtotal_minor >= settings.free_over_minor:
+        return 0
+    if _same_city(seller_city, delivery_city):
+        return settings.same_city_fee_minor
+    return settings.other_city_fee_minor
+
+
+def _seller_city(seller: User | None, listings: list[Listing]) -> str | None:
+    """Where the seller ships from: their profile city, else the city on their listing."""
+    if seller and seller.city:
+        return seller.city
+    return next((listing.city for listing in listings if listing.city), None)
+
+
+def cart_by_seller(db: Session, buyer: User, delivery_city: str | None) -> list[dict]:
+    """The cart grouped per seller with each seller's delivery fee, for the cart screen."""
+    groups: dict[uuid.UUID, list[tuple[CartItem, Listing]]] = {}
+    for item, listing in get_cart(db, buyer):
+        groups.setdefault(listing.seller_id, []).append((item, listing))
+    out = []
+    for seller_id, rows in groups.items():
+        seller = db.get(User, seller_id)
+        settings = get_delivery_settings(db, seller_id)
+        subtotal = sum(listing.price_minor * item.quantity for item, listing in rows)
+        out.append(
+            {
+                "seller": seller,
+                "subtotal_minor": subtotal,
+                "delivery_fee_minor": delivery_fee(
+                    settings,
+                    seller_city=_seller_city(seller, [listing for _, listing in rows]),
+                    delivery_city=delivery_city,
+                    subtotal_minor=subtotal,
+                ),
+                "free_delivery_over_minor": settings.free_over_minor if settings else None,
+            }
+        )
+    return out
+
+
+# ======================================================================================
 # Checkout
 # ======================================================================================
 def checkout(
@@ -133,12 +217,18 @@ def checkout(
     orders: list[Order] = []
     for seller_id, lines in by_seller.items():
         subtotal = sum(listing.price_minor * qty for listing, qty in lines)
+        fee = delivery_fee(
+            get_delivery_settings(db, seller_id),
+            seller_city=_seller_city(db.get(User, seller_id), [listing for listing, _ in lines]),
+            delivery_city=delivery_city,
+            subtotal_minor=subtotal,
+        )
         tx = payments.create_transaction(
             db,
             kind=TransactionKind.PARTS_ORDER,
             customer_id=buyer.id,
             provider_id=seller_id,
-            amount_minor=subtotal,
+            amount_minor=subtotal + fee,
             payment_due=True,
         )
         order = Order(
@@ -148,6 +238,7 @@ def checkout(
             delivery_address=delivery_address.strip(),
             delivery_city=delivery_city,
             contact_phone=contact_phone,
+            delivery_fee_minor=fee,
         )
         for listing, qty in lines:
             order.items.append(
@@ -158,7 +249,7 @@ def checkout(
                     quantity=qty,
                 )
             )
-            _take_stock(listing, qty)
+            _take_stock(db, listing, qty)
         db.add(order)
         orders.append(order)
     for item, _ in cart:
@@ -167,18 +258,20 @@ def checkout(
     return orders
 
 
-def _take_stock(listing: Listing, quantity: int) -> None:
+def _take_stock(db: Session, listing: Listing, quantity: int) -> None:
     if listing.stock is not None:
         listing.stock -= quantity
         if listing.stock == 0:
             listing.status = ListingStatus.SOLD  # out of stock
+        catalog.note_stock_change(db, listing)  # low-stock alert after the commit (FR-4.5)
 
 
-def _return_stock(listing: Listing, quantity: int) -> None:
+def _return_stock(db: Session, listing: Listing, quantity: int) -> None:
     if listing.stock is not None:
         listing.stock += quantity
         if listing.status == ListingStatus.SOLD:
             listing.status = ListingStatus.LIVE
+        catalog.note_stock_change(db, listing)
 
 
 def purchase_vehicle(
@@ -339,6 +432,14 @@ def cancel_order(db: Session, user: User, order_id: uuid.UUID, reason: str | Non
         raise NotFound("Order not found", code="order_not_found")
     if tx.status in FINAL_STATUSES or tx.status not in (TxStatus.PENDING, TxStatus.CONFIRMED):
         raise UnprocessableEntity("This order can no longer be cancelled", code="invalid_status")
+    deadline = payments.cancel_deadline(tx)
+    if user.id == order.buyer_id and deadline is not None and utcnow() > deadline:
+        # The seller's cancellation window (FR-10.3) has passed; the seller can still cancel.
+        raise UnprocessableEntity(
+            "The seller's cancellation window has passed. Contact the seller or open a dispute.",
+            code="cancellation_window_passed",
+            details={"deadline": deadline.isoformat()},
+        )
     payments.cancel_and_refund(db, tx, reason=reason or "Order cancelled")
     for item in order.items:
         listing = (
@@ -352,7 +453,7 @@ def cancel_order(db: Session, user: User, order_id: uuid.UUID, reason: str | Non
             if listing.status == ListingStatus.RESERVED:
                 listing.status = ListingStatus.LIVE
         else:
-            _return_stock(listing, item.quantity)
+            _return_stock(db, listing, item.quantity)
     db.commit()
     other = order.seller_id if user.id == order.buyer_id else order.buyer_id
     publish("order.cancelled", order_id=str(order.id), notify_id=str(other), ref=tx.ref)
@@ -372,3 +473,21 @@ def auto_confirm_shipped(db: Session, *, now=None) -> int:
             count += 1
     db.commit()
     return count
+
+
+@payments.receipt_lines(TransactionKind.PARTS_ORDER, TransactionKind.VEHICLE_SALE)
+def _receipt_lines(db: Session, tx: Transaction) -> list[tuple[str, int]]:
+    """Itemised receipt (FR-9.3): each item, then delivery."""
+    order = db.scalar(select(Order).where(Order.transaction_id == tx.id))
+    if order is None:
+        return []
+    lines = [
+        (
+            f"{i.title} x {i.quantity}" if i.quantity > 1 else i.title,
+            i.unit_price_minor * i.quantity,
+        )
+        for i in order.items
+    ]
+    if order.delivery_fee_minor:
+        lines.append(("Delivery", order.delivery_fee_minor))
+    return lines

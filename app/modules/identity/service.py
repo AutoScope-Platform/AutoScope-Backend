@@ -729,6 +729,21 @@ def erase_account(
         _check_otp(db, user, OtpPurpose.ACCOUNT_ERASURE, code)
     else:
         raise BadRequest("Your password is not correct", code="invalid_password")
+    audit.record(
+        db,
+        category=AuditCategory.AUTH,
+        action="Account erased on request",
+        actor_id=user.id,
+        actor_name="Erased user",
+        target=user.ref,
+        ip_address=ip,
+    )
+    _anonymise(db, user)
+    db.commit()
+
+
+def _anonymise(db: Session, user: User) -> None:
+    """Remove everything that identifies the person; keep the row for financial records."""
     storage = registry.get_storage()
     for submission in db.scalars(select(KycSubmission).where(KycSubmission.user_id == user.id)):
         for doc in submission.documents:
@@ -740,15 +755,6 @@ def erase_account(
     # Unlink Google/Apple so signing in with them again starts a fresh account.
     db.execute(delete(SocialAccount).where(SocialAccount.user_id == user.id))
     _revoke_all_tokens(db, user.id)
-    audit.record(
-        db,
-        category=AuditCategory.AUTH,
-        action="Account erased on request",
-        actor_id=user.id,
-        actor_name="Erased user",
-        target=user.ref,
-        ip_address=ip,
-    )
     user.full_name = "Erased user"
     user.business_name = None
     user.email = None
@@ -757,7 +763,6 @@ def erase_account(
     user.password_hash = hash_password(secrets.token_urlsafe(24))
     user.status = AccountStatus.SUSPENDED
     user.erased_at = utcnow()
-    db.commit()
 
 
 # ======================================================================================
@@ -808,7 +813,68 @@ def kyc_to_out(submission: KycSubmission, *, with_urls: bool = False) -> KycOut:
         documents=documents,
         submitted_at=submission.submitted_at,
         rejection_reason=submission.rejection_reason,
+        id_type=submission.id_type,
+        id_number_last4=submission.id_number_last4,
+        registration_number=submission.registration_number,
+        verified_person_name=submission.verified_person_name,
+        verified_business_name=submission.verified_business_name,
     )
+
+
+def set_kyc_details(
+    db: Session,
+    user: User,
+    *,
+    id_type: str | None,
+    id_number: str | None,
+    registration_number: str | None,
+) -> KycSubmission:
+    """Save the ID and CAC numbers checked when the submission is complete. Only while the
+    documents are still being collected: send them before the last document."""
+    if not user.has_role(*BUSINESS_ROLES):
+        raise Forbidden("Only business accounts submit KYC details", code="kyc_not_required")
+    if user.kyc_status == KycStatus.APPROVED:
+        raise Conflict("Your account is already verified", code="kyc_already_approved")
+    submission = _open_submission(db, user)
+    if submission and submission.status == KycSubmissionStatus.PENDING:
+        raise Conflict("Your documents are already under review", code="kyc_under_review")
+    if submission is None:
+        submission = KycSubmission(user_id=user.id)
+        db.add(submission)
+    if id_number:
+        submission.id_type = id_type
+        submission.id_number = id_number
+        submission.id_number_last4 = id_number[-4:]
+    if registration_number:
+        submission.registration_number = registration_number
+    db.commit()
+    return submission
+
+
+def _run_number_checks(user: User, submission: KycSubmission, kyc) -> tuple[list[str], list[str]]:
+    """Check the ID and CAC numbers, if given. Returns (problems, notes) for the admin."""
+    problems: list[str] = []
+    notes: list[str] = []
+    if submission.id_number and submission.id_type:
+        result = kyc.verify_person(
+            id_type=submission.id_type, id_number=submission.id_number, full_name=user.full_name
+        )
+        submission.verified_person_name = result.name
+        if not result.passed:
+            problems.append(result.reason or "ID number check failed")
+    else:
+        notes.append("ID number")
+    if submission.registration_number:
+        result = kyc.verify_business(
+            registration_number=submission.registration_number,
+            business_name=user.business_name or user.full_name,
+        )
+        submission.verified_business_name = result.name
+        if not result.passed:
+            problems.append(result.reason or "CAC number check failed")
+    else:
+        notes.append("CAC number")
+    return problems, notes
 
 
 def upload_kyc_document(
@@ -868,21 +934,33 @@ def upload_kyc_document(
 
 
 def _submit_kyc(db: Session, user: User, submission: KycSubmission) -> None:
-    """Run the automated ID check on every document, then queue for human review."""
+    """Run the automated checks (documents, then ID and CAC numbers), then queue for human
+    review. A failed or unavailable check flags the submission; the admin decides."""
     kyc = registry.get_kyc()
-    reason: str | None = None
-    for doc in submission.documents:
-        result = kyc.check_document(
-            doc_type=doc.doc_type.value,
-            storage_key=doc.storage_key,
-            filename=doc.filename,
-            full_name=user.full_name,
-        )
-        if not result.passed:
-            reason = result.reason or "Document check failed"
-            break
-    submission.id_check_status = IdCheckStatus.FLAGGED if reason else IdCheckStatus.PASSED
-    submission.id_check_reason = reason
+    problems: list[str] = []
+    notes: list[str] = []
+    try:
+        for doc in submission.documents:
+            result = kyc.check_document(
+                doc_type=doc.doc_type.value,
+                storage_key=doc.storage_key,
+                filename=doc.filename,
+                full_name=user.full_name,
+            )
+            if not result.passed:
+                problems.append(result.reason or "Document check failed")
+                break
+        number_problems, notes = _run_number_checks(user, submission, kyc)
+        problems += number_problems
+    except IntegrationError as exc:
+        problems.append(f"Automated check unavailable, check by hand ({exc})")
+    # The full ID number is only needed for the lookup; keep the last 4 digits.
+    submission.id_number = None
+    submission.id_check_status = IdCheckStatus.FLAGGED if problems else IdCheckStatus.PASSED
+    reason = "; ".join(problems) or (
+        f"No {' or '.join(notes)} given: check the documents by hand" if notes else None
+    )
+    submission.id_check_reason = reason[:200] if reason else None
     submission.status = KycSubmissionStatus.PENDING
     submission.submitted_at = utcnow()
     user.kyc_status = KycStatus.PENDING
@@ -1219,3 +1297,34 @@ def _create_social_user(
         ip_address=ip,
     )
     return user
+
+
+def remove_user(
+    db: Session, user_id: uuid.UUID, *, admin: User, reason: str, ip: str | None
+) -> None:
+    """An admin removes an account for breaking the rules (FR-13.2).
+
+    Same anonymisation as a person deleting their own account (transaction records stay),
+    plus their pending and live listings come down (catalog listens for `user.removed`).
+    """
+    user = get_user(db, user_id)
+    if user.id == admin.id:
+        raise Forbidden("You cannot remove your own account here", code="self_action")
+    if user.erased_at is not None:
+        raise Conflict("This account was already removed", code="already_removed")
+    if user.has_role(*ADMIN_ROLES):
+        raise Forbidden(
+            "Take away the staff role before removing a staff account", code="staff_account"
+        )
+    audit.record(
+        db,
+        category=AuditCategory.ADMIN,
+        action=f"Removed user ({reason.strip()[:100]})",
+        actor_id=admin.id,
+        actor_name=admin.full_name,
+        target=user.ref,
+        ip_address=ip,
+    )
+    _anonymise(db, user)
+    db.commit()
+    publish("user.removed", user_id=str(user.id))

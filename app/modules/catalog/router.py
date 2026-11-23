@@ -9,12 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.errors import error_responses
-from app.core.permissions import ADMIN_ROLES
+from app.core.legal import insurance_disclosure
+from app.core.permissions import ADMIN_ROLES, Capability
 from app.core.ratelimit import client_ip
 from app.modules.catalog import service
 from app.modules.catalog.models import Listing, ListingStatus, ListingType
 from app.modules.catalog.schemas import (
     DecideIn,
+    FitmentOut,
     ImageOut,
     InquiryAnswerIn,
     InquiryIn,
@@ -22,9 +24,17 @@ from app.modules.catalog.schemas import (
     ListingIn,
     ListingOut,
     ListingPage,
+    ListingStatsOut,
     ListingUpdateIn,
     MechanicOut,
     MechanicPage,
+    PartQuoteIn,
+    PartQuoteOut,
+    PartRequestIn,
+    PartRequestOut,
+    PartRequestPage,
+    RecommendationOut,
+    RecommendationsOut,
     ReviewQueueOut,
     SellerOut,
     ServiceRecordIn,
@@ -40,6 +50,7 @@ from app.modules.identity.deps import (
     CurrentUser,
     OptionalUser,
     require_admin,
+    require_capability,
     user_rate_limit,
 )
 from app.modules.identity.models import KycStatus, User
@@ -56,6 +67,8 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
     )
     ratings = reviews.ratings_for(db, seller_ids)
     staff = bool(viewer and viewer.has_role(*ADMIN_ROLES))
+    mine = [r for r in rows if staff or (viewer is not None and viewer.id == r.seller_id)]
+    stats = service.listing_stats(db, mine)
     out = []
     for r in rows:
         seller = sellers[r.seller_id]
@@ -66,6 +79,8 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
                 id=r.id, ref=r.ref, type=r.type, status=r.status, title=r.title,
                 description=r.description, price_minor=r.price_minor, currency=r.currency,
                 city=r.city, latitude=r.latitude, longitude=r.longitude, stock=r.stock,
+                sku=r.sku, low_stock_threshold=r.low_stock_threshold,
+                fits=[FitmentOut(make=f.make, model=f.model, year_from=f.year_from, year_to=f.year_to) for f in r.fitments],
                 vin=r.vin, attributes=r.attributes, created_at=r.created_at,
                 images=[ImageOut(id=i.id, url=service.image_url(i), position=i.position) for i in r.images],
                 seller=SellerOut(
@@ -73,6 +88,9 @@ def _listings_out(db: Session, rows: list[Listing], viewer: User | None) -> list
                     verified=seller.kyc_status == KycStatus.APPROVED,
                     rating=avg, review_count=count,
                 ),
+                disclosure=insurance_disclosure(seller.display_name) if r.type == ListingType.INSURANCE_PRODUCT else None,
+                video_url=service.video_url(r),
+                stats=ListingStatsOut(**stats[r.id]) if r.id in stats else None,
                 rejection_reason=r.rejection_reason if private else None,
                 fraud_signals=list(r.fraud_signals or []) if private else [],
             )
@@ -169,7 +187,11 @@ def _near(lat: float | None, lng: float | None) -> tuple[float, float] | None:
     response_model=ListingPage,
     summary="Search listings (vehicles, parts, services, insurance)",
     description="Public. Pass `lat` and `lng` to filter by distance (`radius_km`) with "
-    "`sort=distance`. `counts_by_type` ignores the `type` filter so apps can show tab counts.",
+    "`sort=distance`. `counts_by_type` ignores the `type` filter so apps can show tab counts.\n\n"
+    "Vehicles: `make`, `model`, `year_min`/`year_max`, `condition` (FR-3.2). Parts that fit a "
+    "vehicle (FR-4.2): `vehicle_id` (a car in your garage, signed in) or `fits_make` with "
+    "optional `fits_model` and `fits_year`. `q` also matches a part's SKU.",
+    responses=error_responses(400, 401, 404),
 )
 def search(
     viewer: OptionalUser,
@@ -179,21 +201,36 @@ def search(
     min_price: int | None = Query(None, ge=0),
     max_price: int | None = Query(None, ge=0),
     make: str | None = None,
+    model: str | None = None,
+    condition: str | None = Query(None, examples=["used"]),
     year_min: int | None = None,
     year_max: int | None = None,
+    vehicle_id: uuid.UUID | None = Query(None, description="Parts that fit this garage vehicle."),
+    fits_make: str | None = None,
+    fits_model: str | None = None,
+    fits_year: int | None = Query(None, ge=1950, le=2100),
     seller_id: uuid.UUID | None = None,
     lat: float | None = Query(None, ge=-90, le=90),
     lng: float | None = Query(None, ge=-180, le=180),
     radius_km: float = Query(25, gt=0, le=2000),
-    sort: str = Query("newest", pattern="^(newest|price_asc|price_desc|distance)$"),
+    sort: str = Query(
+        "newest",
+        pattern="^(newest|price_asc|price_desc|distance|rating|relevance)$",
+        description="`rating`: best-rated sellers first. `relevance`: best match for `q` "
+        "first (needs `q`). `distance`: needs `lat` and `lng`.",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> ListingPage:
+    fits = service.fitment_query(
+        db, viewer, vehicle_id=vehicle_id, make=fits_make, model=fits_model, year=fits_year
+    )
     rows, total, counts = service.search_listings(
         db, q=q, type_=type, city=city, min_price=min_price, max_price=max_price, make=make,
-        year_min=year_min, year_max=year_max, seller_id=seller_id, near=_near(lat, lng),
-        radius_km=radius_km, sort=sort, page=page, page_size=page_size,
+        model=model, condition=condition, year_min=year_min, year_max=year_max, fits=fits,
+        seller_id=seller_id, near=_near(lat, lng), radius_km=radius_km, sort=sort, page=page,
+        page_size=page_size,
     )  # fmt: skip
     return ListingPage(
         items=_listings_out(db, rows, viewer), total=total, page=page, page_size=page_size,
@@ -205,26 +242,37 @@ def search(
     "/mechanics",
     response_model=MechanicPage,
     summary="Find verified mechanics",
-    description="Mechanics with at least one live service, best rated first.",
+    description="Mechanics with at least one live service matching the filters (FR-5.2). "
+    "`service` matches a service's title or category (e.g. `brakes`); `min_price`/`max_price` "
+    "apply to each service, in kobo. Sort by `rating` (default), `price` (cheapest matching "
+    "service) or `distance` (needs `lat` and `lng`).",
 )
 def mechanics(
+    service_q: str | None = Query(None, alias="service", examples=["brakes"]),
+    min_price: int | None = Query(None, ge=0),
+    max_price: int | None = Query(None, ge=0),
+    min_rating: float | None = Query(None, ge=0, le=5),
     city: str | None = None,
     lat: float | None = Query(None, ge=-90, le=90),
     lng: float | None = Query(None, ge=-180, le=180),
     radius_km: float = Query(25, gt=0, le=2000),
+    sort: str = Query("rating", pattern="^(rating|price|distance)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> MechanicPage:
     items, total = service.mechanic_directory(
-        db, city=city, near=_near(lat, lng), radius_km=radius_km, page=page, page_size=page_size
-    )
+        db, city=city, near=_near(lat, lng), radius_km=radius_km, page=page, page_size=page_size,
+        service=service_q, min_price=min_price, max_price=max_price, min_rating=min_rating,
+        sort=sort,
+    )  # fmt: skip
     return MechanicPage(
         items=[
             MechanicOut(
                 id=i["user"].id, name=i["user"].display_name, city=i["user"].city,
                 rating=i["rating"], review_count=i["review_count"],
                 from_price_minor=i["from_price_minor"], services=i["services"],
+                distance_km=i["distance_km"],
             )
             for i in items
         ],
@@ -267,7 +315,8 @@ def my_listings(
     responses=error_responses(404),
 )
 def get_listing(listing_id: uuid.UUID, viewer: OptionalUser, db: Session = Depends(get_db)):
-    return _one(db, service.get_listing(db, listing_id, viewer), viewer)
+    """Opening a listing counts a view for the seller's stats (not the seller's own views)."""
+    return _one(db, service.view_listing(db, listing_id, viewer), viewer)
 
 
 @router.patch(
@@ -348,7 +397,10 @@ def delete_image(
 def create_inquiry(
     listing_id: uuid.UUID, body: InquiryIn, user: CurrentUser, db: Session = Depends(get_db)
 ):
-    return service.create_inquiry(db, user, listing_id, body.message, body.offer_minor)
+    return service.create_inquiry(
+        db, user, listing_id, body.message, body.offer_minor, kind=body.kind,
+        viewing_at=body.viewing_at,
+    )  # fmt: skip
 
 
 @router.get(
@@ -370,7 +422,7 @@ def list_inquiries(listing_id: uuid.UUID, user: CurrentUser, db: Session = Depen
 def answer_inquiry(
     inquiry_id: uuid.UUID, body: InquiryAnswerIn, user: CurrentUser, db: Session = Depends(get_db)
 ):
-    return service.respond_to_inquiry(db, user, inquiry_id, body.accept)
+    return service.respond_to_inquiry(db, user, inquiry_id, body.accept, body.viewing_at)
 
 
 # --- Admin: listing review ---------------------------------------------------------------
@@ -433,3 +485,155 @@ def admin_suspend(
         db, listing_id, reason=body.reason, admin=admin, ip=client_ip(request)
     )
     return _one(db, listing, admin)
+
+
+# --- Video, my enquiries, recommendations ------------------------------------------------
+@router.post(
+    "/listings/{listing_id}/video",
+    response_model=ListingOut,
+    summary="Upload the listing's video (MP4, MOV or WebM, up to 50 MB)",
+    description="One video per listing (FR-3.1); uploading again replaces it.",
+    responses=error_responses(400, 404, 429),
+    dependencies=[Depends(user_rate_limit("listing-video", 10, 60))],
+)
+async def upload_video(
+    listing_id: uuid.UUID,
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> ListingOut:
+    data = await file.read(service.VIDEO_MAX_BYTES + 1)
+    return _one(db, service.set_video(db, user, listing_id, data), user)
+
+
+@router.delete(
+    "/listings/{listing_id}/video",
+    response_model=ListingOut,
+    summary="Remove the listing's video",
+    responses=error_responses(404),
+)
+def delete_video(listing_id: uuid.UUID, user: CurrentUser, db: Session = Depends(get_db)):
+    return _one(db, service.delete_video(db, user, listing_id), user)
+
+
+@router.get(
+    "/me/inquiries",
+    response_model=list[InquiryOut],
+    summary="My questions, offers, inspections and test drives (as a buyer)",
+)
+def my_inquiries(user: CurrentUser, db: Session = Depends(get_db)):
+    return service.my_inquiries(db, user)
+
+
+@router.get(
+    "/me/recommendations",
+    response_model=RecommendationsOut,
+    summary="Suggestions for me (FR-8.4)",
+    description="Parts that fit my garage vehicles, more from sellers I bought from, "
+    "top-rated mechanic services in my city and insurance for my vehicles. Each item says why.",
+)
+def my_recommendations(user: CurrentUser, db: Session = Depends(get_db)) -> RecommendationsOut:
+    pairs = service.recommendations(db, user)
+    listings = _listings_out(db, [listing for _, listing in pairs], user)
+    return RecommendationsOut(
+        items=[
+            RecommendationOut(reason=reason, listing=out)
+            for (reason, _), out in zip(pairs, listings, strict=True)
+        ]
+    )
+
+
+# --- Part requests (FR-4.6) --------------------------------------------------------------
+Buyer = Depends(require_capability(Capability.PURCHASE))
+PartsSeller = Depends(require_capability(Capability.LIST_PARTS))
+
+
+def _request_out(db: Session, request, viewer: User) -> PartRequestOut:
+    quotes = service.visible_quotes(request, viewer)
+    names = (
+        {
+            u.id: u.display_name
+            for u in db.query(User).filter(User.id.in_([q.provider_id for q in quotes]))
+        }
+        if quotes
+        else {}
+    )
+    return PartRequestOut(
+        id=request.id, ref=request.ref, buyer_id=request.buyer_id, vehicle_id=request.vehicle_id,
+        make=request.make, model=request.model, year=request.year, description=request.description,
+        city=request.city, status=request.status, created_at=request.created_at,
+        quotes=[PartQuoteOut.model_validate(q).model_copy(update={"provider_name": names.get(q.provider_id)}) for q in quotes],
+    )  # fmt: skip
+
+
+@router.post(
+    "/part-requests",
+    response_model=PartRequestOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ask sellers for a part that is not listed (FR-4.6)",
+    description="Sellers who stock that make are notified and reply with quotes. Use a garage "
+    "`vehicle_id`, or `make` with optional `model` and `year`.",
+    responses=error_responses(400, 404, 429),
+    dependencies=[Depends(user_rate_limit("part-request", 10, 3600))],
+)
+def create_part_request(body: PartRequestIn, user: User = Buyer, db: Session = Depends(get_db)):
+    return _request_out(db, service.create_part_request(db, user, **body.model_dump()), user)
+
+
+@router.get("/me/part-requests", response_model=list[PartRequestOut], summary="My part requests")
+def my_part_requests(user: CurrentUser, db: Session = Depends(get_db)):
+    return [_request_out(db, r, user) for r in service.my_part_requests(db, user)]
+
+
+@router.get(
+    "/part-requests",
+    response_model=PartRequestPage,
+    summary="Parts seller: open part requests to quote on",
+)
+def open_part_requests(
+    make: str | None = None,
+    city: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    user: User = PartsSeller,
+    db: Session = Depends(get_db),
+) -> PartRequestPage:
+    rows, total = service.open_part_requests(
+        db, user, make=make, city=city, page=page, page_size=page_size
+    )
+    return PartRequestPage(items=[_request_out(db, r, user) for r in rows], total=total)
+
+
+@router.get(
+    "/part-requests/{request_id}",
+    response_model=PartRequestOut,
+    summary="One part request (the buyer sees every quote, cheapest first)",
+    responses=error_responses(404),
+)
+def get_part_request(request_id: uuid.UUID, user: CurrentUser, db: Session = Depends(get_db)):
+    return _request_out(db, service.get_part_request(db, request_id, user), user)
+
+
+@router.put(
+    "/part-requests/{request_id}/quote",
+    response_model=PartQuoteOut,
+    summary="Parts seller: send or revise my quote",
+    responses=error_responses(404, 422),
+)
+def quote_part_request(
+    request_id: uuid.UUID,
+    body: PartQuoteIn,
+    user: User = PartsSeller,
+    db: Session = Depends(get_db),
+):
+    return service.quote_part_request(db, user, request_id, **body.model_dump())
+
+
+@router.post(
+    "/part-requests/{request_id}/close",
+    response_model=PartRequestOut,
+    summary="Close my part request (found it, or no longer needed)",
+    responses=error_responses(404),
+)
+def close_part_request(request_id: uuid.UUID, user: CurrentUser, db: Session = Depends(get_db)):
+    return _request_out(db, service.close_part_request(db, user, request_id), user)

@@ -36,8 +36,16 @@ class Settings(BaseSettings):
     # Accepts a plain `postgresql://` URL (what Neon and Render hand out); it is
     # rewritten to the psycopg 3 driver in `database_url_sync` below.
     database_url: str = "postgresql://autoscope:autoscope@127.0.0.1:5432/autoscope_dev"
+    # Connections per process. Small Postgres tiers allow few connections in total (Azure
+    # Burstable B1ms: about 50), so keep (pool + overflow) x processes under that limit.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
     # Redis is optional in local/test (rate limits and chat fan-out fall back to memory).
+    # Azure Cache for Redis needs TLS: rediss://:<access key>@<name>.redis.cache.windows.net:6380/0
     redis_url: str | None = None
+    # "celery": push/SMS/e-mail are sent by the background worker (needs REDIS_URL and a
+    # running worker). "inline": sent during the request (local development and tests).
+    task_queue: Literal["inline", "celery"] = "inline"
 
     # --- Auth --------------------------------------------------------------------
     jwt_secret: str = Field(default="dev-only-change-me-dev-only-change-me")
@@ -59,9 +67,9 @@ class Settings(BaseSettings):
     email_driver: Literal["mock", "smtp"] = "mock"
     push_driver: Literal["mock", "fcm"] = "mock"
     payment_driver: Literal["mock", "paystack"] = "mock"
-    # Only "mock" exists until a KYC vendor is chosen (see docs/INTEGRATIONS.md).
-    kyc_driver: Literal["mock"] = "mock"
-    storage_driver: Literal["local", "s3"] = "local"
+    # Youverify checks NIN / driver's licence and CAC numbers (see docs/INTEGRATIONS.md).
+    kyc_driver: Literal["mock", "youverify"] = "mock"
+    storage_driver: Literal["local", "s3", "azure"] = "local"
     vin_driver: Literal["mock", "nhtsa"] = "mock"
     # Google/Apple sign-in (FR-1.2). "live" checks real ID tokens against the client ids below.
     social_driver: Literal["mock", "live"] = "mock"
@@ -74,6 +82,14 @@ class Settings(BaseSettings):
     paystack_public_key: str | None = None
     termii_api_key: str | None = None
     termii_sender_id: str | None = None
+    # Each Termii account has its own API address (shown on the Termii dashboard).
+    termii_base_url: str = "https://v4.api.termii.com"
+    # "dnd" reaches every number and is what Termii requires for OTPs and transactional
+    # messages (Termii support switches it on per account); "generic" is promotional only.
+    termii_channel: Literal["dnd", "generic"] = "dnd"
+    # Youverify secret API key (dashboard: API & Webhooks). Sandbox and live keys differ.
+    youverify_api_key: str | None = None
+    youverify_base_url: str = "https://api.sandbox.youverify.co"  # live: https://api.youverify.co
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
@@ -90,6 +106,12 @@ class Settings(BaseSettings):
     s3_access_key_id: str | None = None
     s3_secret_access_key: str | None = None
     s3_region: str = "auto"
+    # Azure Blob Storage: the storage account's connection string (it must include the
+    # AccountKey, used to sign short-lived download links) and the container name.
+    azure_storage_connection_string: str | None = None
+    azure_storage_container: str | None = None
+    # Azure Monitor / Application Insights: requests, errors and logs (TSD monitoring).
+    applicationinsights_connection_string: str | None = None
     local_storage_dir: str = "./.storage"
 
     # --- Business rules defaults (all editable from the admin dashboard) ------------
@@ -123,6 +145,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _reject_mocks_in_production(self) -> Settings:
         """Refuse to boot in production with fake integrations or default secrets."""
+        if self.task_queue == "celery" and not self.redis_url:
+            raise ValueError("TASK_QUEUE=celery needs REDIS_URL (the worker's queue)")
         if not self.is_production:
             return self
         mocks = [
@@ -142,6 +166,8 @@ class Settings(BaseSettings):
             mocks.append("STORAGE_DRIVER")
         if mocks:
             raise ValueError(f"Mock drivers are not allowed in production: {', '.join(mocks)}")
+        if self.kyc_driver == "youverify" and "sandbox" in self.youverify_base_url:
+            raise ValueError("YOUVERIFY_BASE_URL points at the sandbox; use the live address")
         if self.jwt_secret.startswith("dev-only"):
             raise ValueError("JWT_SECRET must be set to a strong random value in production")
         if "*" in self.cors_origin_list:

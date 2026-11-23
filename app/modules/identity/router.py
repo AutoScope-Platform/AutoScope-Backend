@@ -17,6 +17,7 @@ from app.modules.identity.schemas import (
     ChangePasswordIn,
     EraseIn,
     ForgotPasswordIn,
+    KycDetailsIn,
     KycOut,
     LoginIn,
     LoginOut,
@@ -319,6 +320,27 @@ def erase_me(
 def my_kyc(user: CurrentUser, db: Session = Depends(get_db)) -> KycOut | None:
     submission = service.latest_submission(db, user)
     return service.kyc_to_out(submission, with_urls=True) if submission else None
+
+
+@router.put(
+    "/me/kyc-details",
+    response_model=KycOut,
+    summary="Give ID and CAC numbers for the automated check",
+    responses=error_responses(401, 403, 409, 422),
+    dependencies=[Depends(rate_limit("kyc-details", 10, 60))],
+)
+def set_kyc_details(body: KycDetailsIn, user: CurrentUser, db: Session = Depends(get_db)) -> KycOut:
+    """Business accounts give their NIN (or driver's licence number) and CAC number, with
+    consent. Send this **before** uploading the last document: the numbers are checked
+    when the third document arrives. Only the last 4 digits of the ID number are kept."""
+    submission = service.set_kyc_details(
+        db,
+        user,
+        id_type=body.id_type,
+        id_number=body.id_number,
+        registration_number=body.registration_number,
+    )
+    return service.kyc_to_out(submission)
 
 
 @router.post(
