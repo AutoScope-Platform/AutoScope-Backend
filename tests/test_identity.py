@@ -452,6 +452,7 @@ def test_unavailable_id_service_flags_for_a_manual_check(client, db):
     "body",
     [
         {"id_type": "nin", "id_number": "12345"},  # a NIN is 11 digits
+        {"id_type": "drivers_license", "id_number": "ABC1234567890"},  # over 12
         {"id_number": "12345678901"},  # no ID type
         {"registration_number": "hello"},
         {"id_type": "nin", "id_number": "12345678901", "consent": False},
