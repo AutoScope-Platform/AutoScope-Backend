@@ -21,7 +21,7 @@ staging on Azure too, or on Render + Neon (`render.yaml`) as a quick stop-gap.
 Staging and production must never share secrets or databases.
 
 **Launch gate (before real users):** live payment keys tested end to end; a KYC vendor
-integrated (Dojah, chosen by the client; driver still to write); SMS sender ID approved; Redis set (`REDIS_URL`) and tried with two API instances
+integrated (Youverify, chosen by the client; driver still to write); SMS sender ID approved; Redis set (`REDIS_URL`) and tried with two API instances
 for live sockets; backups enabled on the database; first Super admin created; search load test
 re-run on staging hardware (locally: p95 under 350 ms at 100,000 listings, see ARCHITECTURE.md).
 
