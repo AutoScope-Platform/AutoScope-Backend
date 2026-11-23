@@ -28,7 +28,8 @@ plays the four main journeys end to end: parts order, mechanic booking, SOS towi
 - `docs/ARCHITECTURE.md`: how the code is organised and the rules it follows
 - `docs/INTEGRATIONS.md`: external services, keys to fill in, go-live checklist
 - `docs/PROJECT_BRIEF.md`: scope, decisions, launch gate
-- `docs/AZURE.md`: setting up staging/production on Azure and the GitHub deploy
+- `docs/AZURE_WALKTHROUGH.md`: **step by step for the Azure setup call** (what the client clicks, what we run, what you should see)
+- `docs/AZURE.md`: the Azure reference behind it, and `scripts/azure_setup.sh` that does the work
 - `docs/MOBILE_API_GUIDE.md`: **start here, app developers**: which calls each screen makes, payments, live updates, errors
 - `docs/MOBILE_AUTH.md`: sign-up, sign-in (incl. Google/Apple), tokens, account deletion and KYC
 - `CONTRIBUTING.md`: how to add to it
