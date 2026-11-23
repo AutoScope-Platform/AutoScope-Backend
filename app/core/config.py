@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     email_driver: Literal["mock", "smtp"] = "mock"
     push_driver: Literal["mock", "fcm"] = "mock"
     payment_driver: Literal["mock", "paystack"] = "mock"
-    # Only "mock" exists until a KYC vendor is chosen (see docs/INTEGRATIONS.md).
-    kyc_driver: Literal["mock"] = "mock"
+    # Youverify checks NIN / driver's licence and CAC numbers (see docs/INTEGRATIONS.md).
+    kyc_driver: Literal["mock", "youverify"] = "mock"
     storage_driver: Literal["local", "s3", "azure"] = "local"
     vin_driver: Literal["mock", "nhtsa"] = "mock"
     # Google/Apple sign-in (FR-1.2). "live" checks real ID tokens against the client ids below.
@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # "dnd" reaches every number and is what Termii requires for OTPs and transactional
     # messages (Termii support switches it on per account); "generic" is promotional only.
     termii_channel: Literal["dnd", "generic"] = "dnd"
+    # Youverify secret API key (dashboard: API & Webhooks). Sandbox and live keys differ.
+    youverify_api_key: str | None = None
+    youverify_base_url: str = "https://api.sandbox.youverify.co"  # live: https://api.youverify.co
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
@@ -163,6 +166,8 @@ class Settings(BaseSettings):
             mocks.append("STORAGE_DRIVER")
         if mocks:
             raise ValueError(f"Mock drivers are not allowed in production: {', '.join(mocks)}")
+        if self.kyc_driver == "youverify" and "sandbox" in self.youverify_base_url:
+            raise ValueError("YOUVERIFY_BASE_URL points at the sandbox; use the live address")
         if self.jwt_secret.startswith("dev-only"):
             raise ValueError("JWT_SECRET must be set to a strong random value in production")
         if "*" in self.cors_origin_list:
