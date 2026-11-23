@@ -97,7 +97,7 @@ def get_payments() -> PaymentGateway:
 
 
 def get_kyc() -> KycProvider:
-    # Only the mock exists until a vendor (Smile ID, Dojah...) is chosen. See docs/INTEGRATIONS.md.
+    # Only the mock exists until the Youverify driver is written. See docs/INTEGRATIONS.md.
     return _cached("kyc", mock.MockKyc)
 
 

@@ -14,7 +14,7 @@ refused when `ENV=production`.
 | File storage (Azure) | `STORAGE_DRIVER=azure` | Azure Blob Storage | `AZURE_STORAGE_CONNECTION_STRING` (with AccountKey), `AZURE_STORAGE_CONTAINER` | Written and tested against the Azure SDK offline (signed links, upload/download/delete with a stand-in client), **not yet against a real storage account**. Setup: docs/AZURE.md |
 | VIN decoding | `VIN_DRIVER=nhtsa` | NHTSA vPIC (free, no key) | none | Written |
 | Google / Apple sign-in | `SOCIAL_DRIVER=live` | Google ID tokens (google-auth), Apple ID tokens (Apple's public keys) | `GOOGLE_CLIENT_IDS`: the iOS, Android and web OAuth client ids, comma-separated. They live in the Google Cloud project behind the Firebase project (Firebase console: Authentication, enable Google; then Google Cloud console: APIs & Services, Credentials). The OAuth consent screen needs the app name, logo, support e-mail and a privacy policy link. `APPLE_CLIENT_IDS`: the iOS bundle id (add the Services id if web sign-in is added); needs an Apple Developer account. No secrets: we only verify tokens | Written and unit-tested with signed test tokens, **not yet tried with real Google/Apple accounts** |
-| KYC / ID check | `KYC_DRIVER=dojah` | **Dojah** (chosen by the client) | Dojah App ID and secret key (sandbox first) | Mock only: **the Dojah driver still has to be written** |
+| KYC / ID check | `KYC_DRIVER=youverify` | **Youverify** (chosen by the client; earlier Dojah) | Youverify API key from the dashboard (sandbox first) | Mock only: **the Youverify driver still has to be written** |
 | Maps / geocoding | not needed yet | | Distances use PostGIS; add Google/Mapbox only if the client wants address autocomplete or road routing | n/a |
 
 ## Mock behaviour (for demos and tests)
