@@ -275,7 +275,7 @@ class KycOut(BaseModel):
 
 
 NIN_PATTERN = re.compile(r"\d{11}")
-LICENCE_PATTERN = re.compile(r"[A-Z0-9]{5,20}")
+LICENCE_PATTERN = re.compile(r"[A-Z0-9]{5,12}")  # Youverify refuses more than 12
 CAC_PATTERN = re.compile(r"(RC|BN|IT|LP|LLP)\d{4,10}")
 
 
@@ -308,7 +308,7 @@ class KycDetailsIn(BaseModel):
                 raise ValueError(
                     "A NIN is 11 digits"
                     if self.id_type == "nin"
-                    else "Enter the licence number as printed (letters and digits)"
+                    else "Enter the licence number as printed (up to 12 letters and digits)"
                 )
             self.id_number = number
         if self.registration_number is not None:
