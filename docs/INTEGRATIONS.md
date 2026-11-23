@@ -12,6 +12,7 @@ refused when `ENV=production`.
 | Push | `PUSH_DRIVER=fcm` | Firebase Cloud Messaging | `FCM_SERVICE_ACCOUNT_JSON` (the service-account JSON, as one line) | Written, untested live |
 | File storage | `STORAGE_DRIVER=s3` | any S3-compatible | `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_REGION` | Written, untested live. Check that Neon's object storage is S3-compatible for your plan, otherwise use Cloudflare R2 |
 | VIN decoding | `VIN_DRIVER=nhtsa` | NHTSA vPIC (free, no key) | none | Written |
+| Google / Apple sign-in | `SOCIAL_DRIVER=live` | Google ID tokens (google-auth), Apple ID tokens (Apple's public keys) | `GOOGLE_CLIENT_IDS`: the iOS, Android and web OAuth client ids from Google Cloud Console, comma-separated. `APPLE_CLIENT_IDS`: the iOS bundle id (add the Services id if web sign-in is added). No secrets: we only verify tokens | Written and unit-tested with signed test tokens, **not yet tried with real Google/Apple accounts** |
 | KYC / ID check | `KYC_DRIVER` | **none chosen yet** | Pick a vendor (e.g. Smile ID, Dojah, Youverify) and add a driver in `app/integrations/` | Mock only |
 | Maps / geocoding | not needed yet | | Distances use PostGIS; add Google/Mapbox only if the client wants address autocomplete or road routing | n/a |
 
@@ -19,6 +20,11 @@ refused when `ENV=production`.
 - OTP code is always `123456` (`MOCK_OTP_CODE`).
 - Mock payment "charges" instantly; webhooks are signed with a fixed demo secret.
 - Mock KYC passes unless the uploaded file name contains `blurred` or `address`.
+- Mock social sign-in accepts any `id_token` shaped `mock:<subject>:<email>:<name>` (e.g.
+  `mock:g-1:ada@gmail.com:Ada Obi`), so the apps can build the Google/Apple screens before the
+  real client ids exist.
+- Uploads are checked by their content, not the `Content-Type` header: test files must be
+  real JPEG/PNG/WebP/PDF bytes.
 - Sent SMS/e-mail/push are kept in `app/integrations/mock.OUTBOX` (tests read it).
 
 ## Going live checklist
