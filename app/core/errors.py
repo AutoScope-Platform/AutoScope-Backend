@@ -90,6 +90,13 @@ class TooManyRequests(AppError):
     code = "rate_limited"
 
 
+class ServiceUnavailable(AppError):
+    """An outside service we depend on (e.g. Google sign-in) cannot be reached right now."""
+
+    status_code = 503
+    code = "service_unavailable"
+
+
 def _payload(code: str, message: str, details: Any | None = None) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "details": details}}
 
@@ -142,5 +149,6 @@ def error_responses(*codes: int) -> dict[int | str, dict[str, Any]]:
         409: "Conflict with current state",
         422: "Validation or business-rule error",
         429: "Too many requests",
+        503: "An outside service is unavailable; try again shortly",
     }
     return {c: {"model": ErrorResponse, "description": descriptions.get(c, "Error")} for c in codes}

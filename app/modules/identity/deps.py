@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db, utcnow
 from app.core.errors import Forbidden, Unauthorized
 from app.core.permissions import Capability, has_capability
+from app.core.ratelimit import enforce
 from app.core.security import decode_token
 from app.modules.identity.models import AccountStatus, User
 
@@ -89,6 +90,20 @@ def require_capability(capability: Capability) -> Callable[..., User]:
         if not has_capability(user.active_roles, capability):
             raise Forbidden("You do not have permission to do that", code="forbidden")
         return user
+
+    return dependency
+
+
+def user_rate_limit(name: str, limit: int, window_seconds: int) -> Callable[..., None]:
+    """Rate limit counted per signed-in user rather than per IP address.
+
+    Use it on authenticated writes (listing creation, payments). Many Nigerian mobile users
+    share one public IP through their carrier, so a per-IP limit there would block
+    honest customers because of someone else on the same network.
+    """
+
+    def dependency(user: User = Depends(get_current_user)) -> None:
+        enforce(f"rl:{name}:user:{user.id}", limit, window_seconds)
 
     return dependency
 

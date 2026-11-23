@@ -15,10 +15,12 @@ from app.modules.identity.models import KycDocType
 from app.modules.identity.schemas import (
     AddRoleIn,
     ChangePasswordIn,
+    EraseIn,
     ForgotPasswordIn,
     KycOut,
     LoginIn,
     LoginOut,
+    LoginResendIn,
     LoginVerifyIn,
     LogoutIn,
     MeOut,
@@ -29,6 +31,7 @@ from app.modules.identity.schemas import (
     RegisterIn,
     RegisterOut,
     ResetPasswordIn,
+    SocialLoginIn,
     TokenOut,
     TwoFactorIn,
     UserOut,
@@ -124,10 +127,44 @@ def login_verify(body: LoginVerifyIn, request: Request, db: Session = Depends(ge
 
 
 @router.post(
+    "/auth/login/resend",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Resend the sign-in code",
+    responses=error_responses(401, 429),
+    dependencies=[Depends(rate_limit("login-otp-resend", 5, 60))],
+)
+def login_resend(body: LoginResendIn, db: Session = Depends(get_db)) -> dict[str, str]:
+    """For a sign-in waiting on its OTP (`requires_otp: true`). Answers 429 `otp_cooldown`
+    if the last code was sent under 30 seconds ago."""
+    return {"otp_sent_to": service.resend_login_otp(db, body.challenge_token)}
+
+
+@router.post(
+    "/auth/social",
+    response_model=LoginOut,
+    summary="Sign in or sign up with Google or Apple",
+    responses=error_responses(400, 401, 403, 409, 422, 429, 503),
+    dependencies=[Depends(rate_limit("social-login", 20, 60))],
+)
+def social_login(body: SocialLoginIn, request: Request, db: Session = Depends(get_db)) -> LoginOut:
+    """Send the ID token from the Google or Apple SDK (FR-1.2).
+
+    * Returning user: tokens (or an OTP challenge when 2FA is on), like `POST /auth/login`.
+    * New user: `422 signup_details_required` with `details.missing` (e.g. `accept_terms`,
+      `business_name`) and the e-mail/name to prefill. Show the sign-up form, then send the
+      same token again with `accept_terms: true`, `roles` and, for business roles,
+      `business_name`.
+    * An e-mail/password account with the same verified e-mail is linked automatically.
+    """
+    return service.social_sign_in(db, body, ip=client_ip(request), client=client_name(request))
+
+
+@router.post(
     "/auth/refresh",
     response_model=TokenOut,
     summary="Get a new access token",
-    responses=error_responses(401),
+    responses=error_responses(401, 429),
+    dependencies=[Depends(rate_limit("refresh", 30, 60))],
 )
 def refresh(body: RefreshIn, request: Request, db: Session = Depends(get_db)) -> TokenOut:
     """Rotate the refresh token. The old one stops working immediately."""
@@ -241,15 +278,34 @@ def set_two_factor(
     return me_out(service.set_two_factor(db, user, body.enabled, ip=client_ip(request)))
 
 
+@router.post(
+    "/me/erase/code",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Send a code to confirm account deletion",
+    responses=error_responses(401, 429),
+    dependencies=[Depends(rate_limit("erase-code", 5, 60))],
+)
+def erase_code(user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, str]:
+    """For accounts without a password (Google/Apple). Then call `DELETE /me` with the code."""
+    return {"sent_to": service.send_erasure_code(db, user)}
+
+
 @router.delete(
     "/me",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Erase my account",
-    responses=error_responses(401),
+    responses=error_responses(400, 401, 429),
 )
-def erase_me(request: Request, user: CurrentUser, db: Session = Depends(get_db)) -> Response:
-    """Anonymises personal data (NDPR/GDPR right to erasure). Transaction records are kept."""
-    service.erase_account(db, user, ip=client_ip(request))
+def erase_me(
+    body: EraseIn, request: Request, user: CurrentUser, db: Session = Depends(get_db)
+) -> Response:
+    """Anonymises personal data (NDPR/GDPR right to erasure). Transaction records are kept.
+
+    Cannot be undone, so the body must confirm it: `{"password": "..."}`, or
+    `{"code": "123456"}` from `POST /me/erase/code`. (This DELETE has a JSON body; on
+    Android/Retrofit use `@HTTP(method = "DELETE", hasBody = true)`.)
+    """
+    service.erase_account(db, user, password=body.password, code=body.code, ip=client_ip(request))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
