@@ -29,5 +29,6 @@ plays the four main journeys end to end: parts order, mechanic booking, SOS towi
 - `docs/INTEGRATIONS.md`: external services, keys to fill in, go-live checklist
 - `docs/PROJECT_BRIEF.md`: scope, decisions, launch gate
 - `docs/AZURE.md`: setting up staging/production on Azure and the GitHub deploy
-- `docs/MOBILE_AUTH.md`: sign-up, sign-in (incl. Google/Apple), tokens and account deletion for the app developers
+- `docs/MOBILE_API_GUIDE.md`: **start here, app developers**: which calls each screen makes, payments, live updates, errors
+- `docs/MOBILE_AUTH.md`: sign-up, sign-in (incl. Google/Apple), tokens, account deletion and KYC
 - `CONTRIBUTING.md`: how to add to it
