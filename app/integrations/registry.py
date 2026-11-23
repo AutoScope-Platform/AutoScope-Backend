@@ -97,8 +97,15 @@ def get_payments() -> PaymentGateway:
 
 
 def get_kyc() -> KycProvider:
-    # Only the mock exists until the Youverify driver is written. See docs/INTEGRATIONS.md.
-    return _cached("kyc", mock.MockKyc)
+    def build() -> KycProvider:
+        s = get_settings()
+        if s.kyc_driver == "youverify":
+            from app.integrations.youverify import YouverifyKyc
+
+            return YouverifyKyc(s)
+        return mock.MockKyc()
+
+    return _cached("kyc", build)
 
 
 def get_storage() -> StorageProvider:
