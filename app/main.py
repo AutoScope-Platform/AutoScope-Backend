@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from app.core import files
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
+from app.core.headers import SecurityHeadersMiddleware
 from app.modules.admin.router import router as admin_router
 from app.modules.booking.router import router as booking_router
 from app.modules.catalog.router import router as catalog_router
@@ -104,6 +105,8 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Added last, so it is the outermost layer: CORS answers and error pages get the headers too.
+    app.add_middleware(SecurityHeadersMiddleware)
     register_error_handlers(app)
     for router in ROUTERS:
         app.include_router(router, prefix=settings.api_prefix)

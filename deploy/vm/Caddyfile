@@ -8,7 +8,10 @@
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
+		-Via
 	}
+	# The other security headers (CSP, framing, caching...) come from the API itself
+	# (app/core/headers.py), so production has them too.
 	# REST and WebSockets (/api/v1/ws/...) both go to the API.
 	reverse_proxy api:8000
 }
