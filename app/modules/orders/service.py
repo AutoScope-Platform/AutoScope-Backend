@@ -19,7 +19,8 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core import db as db_module
@@ -57,13 +58,14 @@ def _cart_listing(db: Session, buyer: User, listing_id: uuid.UUID) -> Listing:
 
 
 def set_cart_item(db: Session, buyer: User, listing_id: uuid.UUID, quantity: int) -> None:
-    """Add a part, or change its quantity. Quantity 0 removes it."""
-    item = db.scalar(
-        select(CartItem).where(CartItem.user_id == buyer.id, CartItem.listing_id == listing_id)
-    )
+    """Add a part, or change its quantity. Quantity 0 removes it.
+
+    One statement each way, so two requests at once (a double tap, two phones) both succeed
+    instead of the second failing on the one-line-per-part rule (found by the load test)."""
     if quantity <= 0:
-        if item:
-            db.delete(item)
+        db.execute(
+            delete(CartItem).where(CartItem.user_id == buyer.id, CartItem.listing_id == listing_id)
+        )
         db.commit()
         return
     listing = _cart_listing(db, buyer, listing_id)
@@ -73,10 +75,15 @@ def set_cart_item(db: Session, buyer: User, listing_id: uuid.UUID, quantity: int
             code="insufficient_stock",
             details={"stock": listing.stock},
         )
-    if item is None:
-        item = CartItem(user_id=buyer.id, listing_id=listing_id)
-        db.add(item)
-    item.quantity = quantity
+    upsert = pg_insert(CartItem).values(
+        id=uuid.uuid4(), user_id=buyer.id, listing_id=listing_id, quantity=quantity
+    )
+    db.execute(
+        upsert.on_conflict_do_update(
+            index_elements=[CartItem.user_id, CartItem.listing_id],
+            set_={"quantity": upsert.excluded.quantity, "updated_at": utcnow()},
+        )
+    )
     db.commit()
 
 
