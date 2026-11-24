@@ -103,6 +103,7 @@ def get_engine() -> Engine:
             pool_pre_ping=True,  # survives Neon scale-to-zero and dropped connections
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
         )
         _session_factory = sessionmaker(_engine, expire_on_commit=False)
     return _engine

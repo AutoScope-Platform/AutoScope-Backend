@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core import files
+from app.core.concurrency import ConcurrencyLimitMiddleware, concurrency_limit
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
 from app.core.headers import SecurityHeadersMiddleware
@@ -98,6 +99,14 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         openapi_url="/openapi.json",
     )
+    # Innermost, so a "busy" answer still gets CORS and the security headers.
+    app.add_middleware(
+        ConcurrencyLimitMiddleware,
+        limit=concurrency_limit(
+            settings.db_pool_size, settings.db_max_overflow, settings.max_concurrent_requests
+        ),
+        queue_seconds=settings.request_queue_seconds,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
@@ -113,9 +122,10 @@ def create_app() -> FastAPI:
     app.include_router(files.router, prefix=settings.api_prefix)
 
     @app.get("/health", tags=["Health"], summary="Liveness check")
-    def health() -> dict[str, str]:
+    async def health() -> dict[str, str]:
         """Liveness: the process is up. Does not touch the database, so a database outage
-        does not make the platform restart every instance."""
+        does not make the platform restart every instance. Async, so it answers even when
+        every worker thread is busy."""
         return {"status": "ok"}
 
     @app.get("/health/ready", tags=["Health"], summary="Readiness check")
