@@ -19,7 +19,7 @@ set -euo pipefail
 # --- 0. Names and region -------------------------------------------------------------------
 ENVNAME="${ENVNAME:-staging}"
 LOC="${LOC:-southafricanorth}"            # or westeurope: check latency from Lagos and NDPA rules
-GITHUB_REPO="${GITHUB_REPO:-Paralexapp/AutoScope-Backend}"
+GITHUB_REPO="${GITHUB_REPO:-AutoScope-Platform/AutoScope-Backend}"
 SUFFIX="${SUFFIX:-}"                      # added to the globally unique names if they are taken
 RG="${RG:-autoscope-$ENVNAME}"
 LAW="autoscope-$ENVNAME-logs"

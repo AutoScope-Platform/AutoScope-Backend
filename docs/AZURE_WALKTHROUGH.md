@@ -162,7 +162,7 @@ These let Azure restart the API automatically if it ever gets stuck.
 
 ### B6. Turn on automatic deploys from GitHub
 Needs someone with **admin** on the GitHub repo (the client, or whoever created it).
-1. GitHub → **Paralexapp/AutoScope-Backend** → **Settings** → **Environments** → **New environment** → name **`staging`**.
+1. GitHub → **AutoScope-Platform/AutoScope-Backend** → **Settings** → **Environments** → **New environment** → name **`staging`**.
 2. In that environment, under **Environment variables**, add each variable from the B4 output:
    `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`,
    `ACR_NAME`, `API_APP`, `WORKER_APP`, `MIGRATE_JOB`.
