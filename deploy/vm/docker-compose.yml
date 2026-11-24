@@ -7,9 +7,7 @@
 name: autoscope
 
 x-app: &app
-  build:
-    context: ../..
-    dockerfile: Dockerfile
+  # Built once (by the api service) and shared with the worker.
   image: autoscope-api:latest
   restart: unless-stopped
   env_file: .env
@@ -29,6 +27,9 @@ x-app: &app
 services:
   api:
     <<: *app
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     environment:
       ENV: staging
       DATABASE_URL: postgresql://autoscope:${POSTGRES_PASSWORD}@db:5432/autoscope
@@ -49,6 +50,7 @@ services:
 
   worker:
     <<: *app
+    pull_policy: never              # uses the image the api service just built
     # Exactly one worker: Celery beat runs inside and would fire scheduled jobs twice with more.
     command: ["celery", "-A", "app.worker.celery_app", "worker", "--beat", "--loglevel=info", "--concurrency=2"]
 
