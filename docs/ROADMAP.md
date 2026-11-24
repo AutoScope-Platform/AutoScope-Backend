@@ -13,7 +13,7 @@ connected and tested; the other services run on stand-ins until their accounts a
 
 - [x] 1. Invite the mobile developer to the repo (read access).
 - [x] 2. Automated security scan of staging (OWASP ZAP): no high-risk findings, missing headers fixed ([SECURITY_SCAN.md](SECURITY_SCAN.md)).
-- [ ] 3. Load test on staging: many users browsing, ordering and booking at once.
+- [x] 3. Load test on staging: fast up to ~90 requests/s; found and fixed a lock-up under heavy load and a cart error ([LOAD_TEST.md](LOAD_TEST.md)).
 - [x] 4. Nightly database backup on the staging VM (database and uploads at 10:30pm, newest 7 kept; restore tested).
 - [ ] 5. *(Optional, needs the client's OK: small cost)* Auto-start the VM every morning.
 - [ ] 6. Full test card payment through Paystack's checkout page (test card), confirmed by the backend.
