@@ -97,6 +97,9 @@ REMOTE
 
 step "Building and starting (the first build takes a few minutes)"
 "${SSH[@]}" "cd $APP_DIR/code/deploy/vm && sg docker -c 'docker compose up -d --build --remove-orphans' 2>&1 | tail -15"
+# Each deploy replaces the code folder, but a running Caddy keeps reading the old copy of its
+# Caddyfile. Recreate it so Caddyfile changes apply (its certificates live in a volume).
+"${SSH[@]}" "cd $APP_DIR/code/deploy/vm && sg docker -c 'docker compose up -d --force-recreate --no-deps caddy' 2>&1 | tail -1"
 # The uploads volume was first created owned by root, which the API (user "app") can't write.
 "${SSH[@]}" "cd $APP_DIR/code/deploy/vm && sg docker -c 'docker compose exec -T -u root api chown app:app /data/uploads' </dev/null"
 
