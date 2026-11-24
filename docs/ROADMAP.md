@@ -12,7 +12,7 @@ connected and tested; the other services run on stand-ins until their accounts a
 ## Stage 1: things we can do now
 
 - [x] 1. Invite the mobile developer to the repo (read access).
-- [ ] 2. Automated security scan of staging (OWASP ZAP baseline); fix anything real it finds.
+- [x] 2. Automated security scan of staging (OWASP ZAP): no high-risk findings, missing headers fixed ([SECURITY_SCAN.md](SECURITY_SCAN.md)).
 - [ ] 3. Load test on staging: many users browsing, ordering and booking at once.
 - [x] 4. Nightly database backup on the staging VM (database and uploads at 10:30pm, newest 7 kept; restore tested).
 - [ ] 5. *(Optional, needs the client's OK: small cost)* Auto-start the VM every morning.
@@ -51,6 +51,8 @@ These block production, not the mobile developer. As each arrives, switch it on 
 - Phases 1–3 of the FSD/TSD built, 200+ automated tests, CI on every PR.
 - Search load test: p95 under 350 ms at 100,000 listings (local).
 - Security scans (Nov 2026): no known vulnerabilities in the 99 libraries; no high or medium issues in the code.
+- OWASP ZAP scan of staging, public and signed in (customer, dealer, Super admin), about
+  136,000 requests: no high-risk findings, no server errors; security headers added.
 - Integrations: Termii driver (account address, DND route), Youverify KYC (NIN, licence, CAC), Firebase push key, Paystack test keys checked.
 - Repo moved to `AutoScope-Platform/AutoScope-Backend`, `develop` is the default branch.
 - Staging live on the client's VM, with demo data, tested end to end.
