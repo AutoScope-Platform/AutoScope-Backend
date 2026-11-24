@@ -28,6 +28,7 @@ plays the four main journeys end to end: parts order, mechanic booking, SOS towi
 - `docs/ARCHITECTURE.md`: how the code is organised and the rules it follows
 - `docs/INTEGRATIONS.md`: external services, keys to fill in, go-live checklist
 - `docs/PROJECT_BRIEF.md`: scope, decisions, launch gate
+- `docs/ROADMAP.md`: **what is left before production**, as a checklist
 - `docs/VM_STAGING.md`: **the staging server** (Azure VM): switching it on, deploying updates, logs
 - `docs/AZURE_WALKTHROUGH.md`: **step by step for the Azure setup call** (what the client clicks, what we run, what you should see)
 - `docs/AZURE.md`: the Azure reference behind it, and `scripts/azure_setup.sh` that does the work
