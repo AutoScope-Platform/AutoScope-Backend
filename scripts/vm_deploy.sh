@@ -97,6 +97,8 @@ REMOTE
 
 step "Building and starting (the first build takes a few minutes)"
 "${SSH[@]}" "cd $APP_DIR/code/deploy/vm && sg docker -c 'docker compose up -d --build --remove-orphans' 2>&1 | tail -15"
+# The uploads volume was first created owned by root, which the API (user "app") can't write.
+"${SSH[@]}" "cd $APP_DIR/code/deploy/vm && sg docker -c 'docker compose exec -T -u root api chown app:app /data/uploads' </dev/null"
 
 step "Waiting for the API"
 for _ in $(seq 1 40); do

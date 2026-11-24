@@ -28,13 +28,13 @@ mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT
 
 log "backup $stamp: database"
-docker compose exec -T db pg_dump -U autoscope -d autoscope --format=custom --compress=6 >"$work/db.dump"
+docker compose exec -T db pg_dump -U autoscope -d autoscope --format=custom --compress=6 </dev/null >"$work/db.dump"
 # A dump that pg_restore can't read is worse than none: check it before keeping it.
 docker compose exec -T db pg_restore --list <"$work/db.dump" >/dev/null \
   || { log "backup $stamp: FAILED, the database dump is unreadable"; exit 1; }
 
 log "backup $stamp: uploaded files"
-docker compose exec -T api tar -czf - -C /data/uploads . >"$work/uploads.tar.gz"
+docker compose exec -T api tar -czf - -C /data/uploads . </dev/null >"$work/uploads.tar.gz"
 tar -tzf "$work/uploads.tar.gz" >/dev/null \
   || { log "backup $stamp: FAILED, the uploads archive is unreadable"; exit 1; }
 

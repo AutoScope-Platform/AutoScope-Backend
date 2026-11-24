@@ -9,7 +9,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 FROM python:3.12-slim
 # libpq is needed by the PostgreSQL driver at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
-    && rm -rf /var/lib/apt/lists/* && useradd --create-home app
+    && rm -rf /var/lib/apt/lists/* && useradd --create-home app \
+    && mkdir -p /data/uploads && chown app:app /data/uploads
+# /data/uploads: where STORAGE_DRIVER=local keeps files. Created here, owned by the app user,
+# so a Docker volume mounted on it starts writable (otherwise Docker creates it owned by root).
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
 COPY alembic.ini ./
