@@ -1,0 +1,100 @@
+# Staging on one Azure virtual machine (Ubuntu + Docker). Everything runs here:
+# HTTPS proxy, API, background worker, PostgreSQL with PostGIS, Redis.
+# Started and updated by scripts/vm_deploy.sh; see docs/VM_STAGING.md.
+#
+# Every service restarts by itself, so when the VM is switched on in the morning the API
+# comes back without anyone logging in.
+name: autoscope
+
+x-app: &app
+  # Built once (by the api service) and shared with the worker.
+  image: autoscope-api:latest
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    ENV: staging
+    DATABASE_URL: postgresql://autoscope:${POSTGRES_PASSWORD}@db:5432/autoscope
+    REDIS_URL: redis://redis:6379/0
+    TASK_QUEUE: celery
+    STORAGE_DRIVER: local
+    LOCAL_STORAGE_DIR: /data/uploads
+  volumes:
+    - uploads:/data/uploads
+  depends_on:
+    db: { condition: service_healthy }
+    redis: { condition: service_healthy }
+
+services:
+  api:
+    <<: *app
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      ENV: staging
+      DATABASE_URL: postgresql://autoscope:${POSTGRES_PASSWORD}@db:5432/autoscope
+      REDIS_URL: redis://redis:6379/0
+      TASK_QUEUE: celery
+      STORAGE_DRIVER: local
+      LOCAL_STORAGE_DIR: /data/uploads
+      RUN_MIGRATIONS: "true"          # one API instance, so it migrates on start
+      WEB_CONCURRENCY: "2"
+      FORWARDED_ALLOW_IPS: "*"        # only Caddy can reach the API, so trust its headers
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  worker:
+    <<: *app
+    pull_policy: never              # uses the image the api service just built
+    # Exactly one worker: Celery beat runs inside and would fire scheduled jobs twice with more.
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--beat", "--loglevel=info", "--concurrency=2"]
+
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: autoscope
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: autoscope
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autoscope -d autoscope"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redisdata:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  caddy:
+    # HTTPS with a free, automatically renewed certificate (Let's Encrypt).
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
+  caddydata:
+  caddyconfig:

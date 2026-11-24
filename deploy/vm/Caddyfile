@@ -1,0 +1,14 @@
+# HTTPS in front of the API. SITE_ADDRESS is the public host name, e.g. 20-1-2-3.sslip.io
+# (sslip.io turns the server's fixed IP into a host name, so a certificate can be issued
+# without buying a domain). Swap it for api-staging.<your-domain> later.
+{$SITE_ADDRESS} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+	# REST and WebSockets (/api/v1/ws/...) both go to the API.
+	reverse_proxy api:8000
+}

@@ -10,10 +10,14 @@ detail in [MOBILE_AUTH.md](MOBILE_AUTH.md).
 
 | | |
 | --- | --- |
-| API base | `https://<staging-host>/api/v1` (staging URL to follow), locally `http://localhost:8000/api/v1` |
-| Swagger | `https://<host>/docs`. Click **Authorize** and paste an access token to try any call |
-| OpenAPI file | `https://<host>/openapi.json`. Generate a typed client from it (e.g. openapi-generator, or `dio` + `retrofit` for Flutter) |
-| Live events | `wss://<host>/api/v1/ws/events?token=<access token>` |
+| API base | **Staging: `https://20-106-252-207.sslip.io/api/v1`** (switches off at 11pm each night, see below). Locally `http://localhost:8000/api/v1` |
+| Swagger | `https://20-106-252-207.sslip.io/docs`. Click **Authorize** and paste an access token to try any call |
+| OpenAPI file | `https://20-106-252-207.sslip.io/openapi.json`. Generate a typed client from it (e.g. openapi-generator, or `dio` + `retrofit` for Flutter) |
+| Live events | `wss://20-106-252-207.sslip.io/api/v1/ws/events?token=<access token>` |
+
+**Staging hours:** the staging server switches itself off at **11pm (Nigeria time)** to save cost
+and is switched back on in the morning. If calls time out late at night, that's why: the data is
+kept, and everything is back as soon as it's on.
 
 **Demo accounts** (staging and local, after `make seed`). Every password is `AutoScope#2026`,
 and every SMS/OTP code is `123456`.
