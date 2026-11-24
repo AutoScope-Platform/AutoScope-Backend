@@ -61,7 +61,7 @@ globally unique). Example for staging:
 
 ```bash
 ENVNAME=staging
-GITHUB_REPO=Paralexapp/AutoScope-Backend   # owner/name exactly as on GitHub: Azure only trusts deploys from it
+GITHUB_REPO=AutoScope-Platform/AutoScope-Backend   # owner/name exactly as on GitHub: Azure only trusts deploys from it
 LOC=southafricanorth            # or westeurope; check latency from Lagos and NDPA data rules
 RG=autoscope-$ENVNAME
 LAW=autoscope-$ENVNAME-logs
