@@ -11,10 +11,10 @@ connected and tested; the other services run on stand-ins until their accounts a
 
 ## Stage 1: things we can do now
 
-- [ ] 1. Invite the mobile developer to the repo (read access). *Waiting for their GitHub username.*
+- [x] 1. Invite the mobile developer to the repo (read access).
 - [ ] 2. Automated security scan of staging (OWASP ZAP baseline); fix anything real it finds.
 - [ ] 3. Load test on staging: many users browsing, ordering and booking at once.
-- [ ] 4. Nightly database backup on the staging VM.
+- [x] 4. Nightly database backup on the staging VM (database and uploads at 10:30pm, newest 7 kept; restore tested).
 - [ ] 5. *(Optional, needs the client's OK: small cost)* Auto-start the VM every morning.
 - [ ] 6. Full test card payment through Paystack's checkout page (test card), confirmed by the backend.
 
@@ -54,3 +54,5 @@ These block production, not the mobile developer. As each arrives, switch it on 
 - Integrations: Termii driver (account address, DND route), Youverify KYC (NIN, licence, CAC), Firebase push key, Paystack test keys checked.
 - Repo moved to `AutoScope-Platform/AutoScope-Backend`, `develop` is the default branch.
 - Staging live on the client's VM, with demo data, tested end to end.
+- Nightly staging backups. Setting them up found that uploads failed on staging (the folder
+  belonged to root); fixed and tested with a real photo upload.

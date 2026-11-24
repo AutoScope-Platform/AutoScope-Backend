@@ -79,6 +79,46 @@ Point a DNS `A` record (e.g. `api-staging.autoscope.ng`) at the VM's IP, then de
 `SITE_ADDRESS=api-staging.autoscope.ng bash scripts/vm_deploy.sh`. Caddy fetches the certificate
 itself. Add the new address to the app and to `CORS_ORIGINS` if the admin dashboard calls it.
 
+## Backups
+
+Every night at **10:30pm (West Africa time)**, before the 11pm shutdown, the VM backs up the
+database and the uploaded files (`deploy/vm/backup.sh`, run by the `autoscope-backup` systemd
+timer that `scripts/vm_deploy.sh` installs). If the VM was off at 10:30pm, the backup runs as
+soon as it is switched on. Each backup is checked as readable before it is kept, and the newest
+**7** are kept.
+
+| Path on the VM | What |
+| --- | --- |
+| `/opt/autoscope/backups/<date>_<time>/db.dump` | The whole database (`pg_dump` custom format) |
+| `/opt/autoscope/backups/<date>_<time>/uploads.tar.gz` | The uploaded files |
+| `/opt/autoscope/backup.log` | What each run did |
+
+The backups sit on the VM's own disk: they cover mistakes and bad data, not losing the VM
+itself. Production gets managed backups (docs/AZURE.md).
+
+```bash
+bash /opt/autoscope/code/deploy/vm/backup.sh      # back up now
+systemctl list-timers autoscope-backup.timer       # when the next one runs
+tail /opt/autoscope/backup.log                     # recent runs
+```
+
+**Restoring** (replaces everything in staging with the backup; in `/opt/autoscope/code/deploy/vm`):
+
+```bash
+B=/opt/autoscope/backups/2026-11-24_2230              # the backup to restore
+docker compose stop api worker
+docker compose exec -T db psql -U autoscope -d postgres \
+  -c "drop database autoscope with (force)" -c "create database autoscope"
+docker compose exec -T db pg_restore -U autoscope -d autoscope --no-owner < $B/db.dump
+docker compose run --rm -T --no-deps -u root api sh -c \
+  'rm -rf /data/uploads/* && tar -xzf - -C /data/uploads && chown -R app:app /data/uploads' < $B/uploads.tar.gz
+docker compose start api worker
+```
+
+To try a backup without touching staging, restore `db.dump` into a scratch database
+(`create database restore_test`, `pg_restore -d restore_test ...`, then drop it): this was
+done when backups were set up, and every table came back with the same row count.
+
 ## Demo data
 
 Loaded once with `SEED=1 bash scripts/vm_deploy.sh`. Demo logins: see docs/MOBILE_API_GUIDE.md

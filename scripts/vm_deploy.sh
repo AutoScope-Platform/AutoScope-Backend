@@ -97,6 +97,8 @@ REMOTE
 
 step "Building and starting (the first build takes a few minutes)"
 "${SSH[@]}" "cd $APP_DIR/code/deploy/vm && sg docker -c 'docker compose up -d --build --remove-orphans' 2>&1 | tail -15"
+# The uploads volume was first created owned by root, which the API (user "app") can't write.
+"${SSH[@]}" "cd $APP_DIR/code/deploy/vm && sg docker -c 'docker compose exec -T -u root api chown app:app /data/uploads' </dev/null"
 
 step "Waiting for the API"
 for _ in $(seq 1 40); do
@@ -109,6 +111,41 @@ if [[ "$code" != 200 ]]; then
   fail "https://$SITE/health/ready answered '$code' (logs above)"
 fi
 ok "https://$SITE/health/ready answers 200"
+
+step "Nightly backup (database and uploads, 10:30pm West Africa time)"
+# A systemd timer, not cron: with Persistent=true a backup missed while the VM was off runs
+# as soon as it is switched on again.
+"${SSH[@]}" "bash -s" <<'REMOTE'
+set -euo pipefail
+sudo tee /etc/systemd/system/autoscope-backup.service >/dev/null <<EOF
+[Unit]
+Description=AutoScope staging backup (database and uploads)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=$USER
+ExecStart=/bin/bash /opt/autoscope/code/deploy/vm/backup.sh
+StandardOutput=append:/opt/autoscope/backup.log
+StandardError=append:/opt/autoscope/backup.log
+EOF
+sudo tee /etc/systemd/system/autoscope-backup.timer >/dev/null <<'EOF'
+[Unit]
+Description=AutoScope staging backup every night, before the 11pm shutdown
+
+[Timer]
+OnCalendar=*-*-* 22:30:00 Africa/Lagos
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now autoscope-backup.timer >/dev/null 2>&1
+echo "   next run: $(systemctl show autoscope-backup.timer -p NextElapseUSecRealtime --value)"
+REMOTE
 
 if [[ "${SEED:-0}" == "1" ]]; then
   step "Loading the demo accounts and data"
