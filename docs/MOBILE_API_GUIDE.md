@@ -257,6 +257,7 @@ After a completed order, booking or job: `POST /reviews`. A provider replies wit
 | `token_expired` (401) | Refresh once and retry |
 | `rate_limited` (429) | Wait and retry later; show a gentle message |
 | `otp_cooldown` (429) | Disable "Resend code" for 30 seconds |
+| `service_busy` (503) | The server is at full load: wait the `Retry-After` seconds (2), retry once or twice, then show "Busy, try again". Safe to retry; writes that move money also send `Idempotency-Key` |
 | `signup_details_required` (422) | Social sign-in: ask for the fields in `details.missing` |
 | `kyc_under_review` (409) | Show "Your documents are being reviewed" |
 | `idempotency_key_reused` (409) | You reused a key for a different request: make a new key |

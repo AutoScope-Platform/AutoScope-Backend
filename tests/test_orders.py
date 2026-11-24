@@ -7,6 +7,7 @@ import pytest
 from app.core.permissions import Role
 from app.modules.catalog.models import Listing, ListingStatus
 from app.modules.identity.models import KycStatus
+from app.modules.orders.models import CartItem
 from app.modules.payments import service as payments
 from tests.factories import auth_headers, make_user
 
@@ -69,6 +70,27 @@ def test_cart_rules(client, db, world):
     assert put(3).json()["items"][0]["quantity"] == 3
     assert put(1, auth_headers(s1)).status_code == 422  # own listing
     assert put(0).json()["items"] == []
+
+
+def test_cart_repeated_adds_and_removes_never_fail(client, db, world):
+    """A double tap sends the same request twice: the second add updates the one line, and
+    removing something already gone is fine (the load test found these answered 500)."""
+    admin, buyer, s1, _ = world
+    part = _part(client, db, s1, admin, stock=5)
+    headers = auth_headers(buyer)
+    put = lambda qty: client.put(  # noqa: E731
+        f"{API}/cart/items", json={"listing_id": part["id"], "quantity": qty}, headers=headers
+    )
+    for _ in range(2):
+        r = put(1)
+        assert r.status_code == 200, r.text
+        assert [line["quantity"] for line in r.json()["items"]] == [1]
+    assert put(2).json()["items"][0]["quantity"] == 2
+    for _ in range(2):
+        r = put(0)
+        assert r.status_code == 200, r.text
+        assert r.json()["items"] == []
+    assert db.query(CartItem).filter_by(user_id=buyer.id).count() == 0
 
 
 def test_checkout_splits_by_seller_and_takes_stock(client, db, world):

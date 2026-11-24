@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # Burstable B1ms: about 50), so keep (pool + overflow) x processes under that limit.
     db_pool_size: int = 10
     db_max_overflow: int = 20
+    # Seconds a request waits for a free connection before failing (SQLAlchemy's default is 30).
+    db_pool_timeout: float = 10
+    # Requests one process works on at once; the rest wait in a queue (app/core/concurrency.py).
+    # Empty means half the connections ((pool + overflow) // 2), since a request can hold two
+    # (its own session plus an event handler's), so a request let in always gets its
+    # connections and the API cannot lock up under load (found by the Nov 2026 load test).
+    max_concurrent_requests: int | None = None
+    # Seconds a request may wait in that queue before getting 503 "busy, try again".
+    request_queue_seconds: float = 10
     # Redis is optional in local/test (rate limits and chat fan-out fall back to memory).
     # Azure Cache for Redis needs TLS: rediss://:<access key>@<name>.redis.cache.windows.net:6380/0
     redis_url: str | None = None
